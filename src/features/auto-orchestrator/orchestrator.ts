@@ -328,7 +328,7 @@ async function runStep(state: OrchestratorState): Promise<void> {
 
   // --- auth.openai.com：可能是中间跳转或验证完成页 ---
   if (hostname === 'auth.openai.com') {
-    // 如果验证码已处理完但页面没跳转（显示"已验证"），尝试直接获取 session
+    // 1. 验证码刚处理完，处理资料页或已注册账号
     if (state.completedSteps.includes('wait-otp') && !state.completedSteps.includes('fill-profile')) {
       // 先检查是否是资料页（about-you），如果是就填写
       if (isAboutYouPage()) {
@@ -348,10 +348,11 @@ async function runStep(state: OrchestratorState): Promise<void> {
         type: 'opx:fetch-chatgpt-session',
       });
       if (sessionResponse?.ok && sessionResponse.session?.accessToken) {
-        // 能获取到 session 说明注册已完成，跳过资料填写直接跳转
+        // 能获取到 session 说明注册已完成
         await markCompleted('fill-profile', '已注册账号，跳过资料填写');
         await markCompleted('fetch-session', `Session 已读取：${sessionResponse.session.email}`);
-        window.location.href = 'https://chatgpt.com/';
+        // 直接生成链接并跳转，不必经过 chatgpt.com
+        await generateLinkAndRedirect(sessionResponse.session.accessToken);
         return;
       }
 
@@ -360,23 +361,63 @@ async function runStep(state: OrchestratorState): Promise<void> {
       return;
     }
 
-    // 资料已填完但还在 auth 页面，尝试获取 session 然后跳转
+    // 2. 资料填完但还在 auth 页面，轮询 session 然后直接生成链接 + 跳转支付页（不经过 chatgpt.com）
     if (state.completedSteps.includes('fill-profile') && !state.completedSteps.includes('fetch-session')) {
+      await setStep('fetch-session', '资料已提交，正在读取 session...');
       const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
         type: 'opx:fetch-chatgpt-session',
       });
       if (sessionResponse?.ok && sessionResponse.session?.accessToken) {
         await markCompleted('fetch-session', `Session 已读取：${sessionResponse.session.email}`);
-        window.location.href = 'https://chatgpt.com/';
+        // 直接生成订阅链接，跳过 chatgpt.com 中转
+        await generateLinkAndRedirect(sessionResponse.session.accessToken);
         return;
       }
-      await setStep('fetch-session', '资料已填，等待跳转到 chatgpt.com...');
+      await setStep('fetch-session', 'Session 还未生成，继续等待...');
+      return;
+    }
+
+    // 3. session 已读取但链接还没生成（极少见，可能跳转失败）
+    if (state.completedSteps.includes('fetch-session') && !state.completedSteps.includes('generate-link')) {
+      const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
+        type: 'opx:fetch-chatgpt-session',
+      });
+      const token = sessionResponse?.session?.accessToken || '';
+      if (token) {
+        await generateLinkAndRedirect(token);
+        return;
+      }
+      await setStep('generate-link', '等待 session...');
       return;
     }
 
     await setStep(state.currentStep, '在 auth.openai.com 中间页，等待跳转...');
     return;
   }
+}
+
+// 直接生成订阅链接并跳转到支付页（适用于在 auth.openai.com 上拿到 session 的情况）
+async function generateLinkAndRedirect(token: string): Promise<void> {
+  await setStep('generate-link', '正在生成 Plus 订阅链接...');
+  const linkState = await loadLinkExtractorState();
+  const linkResponse: CheckoutLinkResponse = await browser.runtime.sendMessage({
+    type: 'opx:create-checkout-link',
+    raw: token,
+    options: linkState.checkoutOptions,
+  });
+
+  const link = linkResponse?.link || linkResponse?.url || '';
+  if (!linkResponse?.ok || !link) {
+    await setStep('error', linkResponse?.message || '生成链接失败', linkResponse?.message || '');
+    return;
+  }
+
+  await saveOrchestratorState({ generatedLink: link });
+  await markCompleted('generate-link', `链接已生成`);
+
+  // 立即跳转到支付页（跳过 chatgpt.com 中转）
+  await setStep('open-checkout', '正在跳转到支付页...');
+  window.location.href = link;
 }
 
 async function setStep(step: OrchestratorStep, message: string, errorMsg?: string): Promise<void> {
