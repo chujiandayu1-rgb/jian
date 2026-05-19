@@ -53,7 +53,32 @@ export async function fillOtpAndContinue(code: string): Promise<ActionResult> {
     return fail('验证码继续按钮仍然不可点击');
   }
 
+  // 双保险：先 click，再对输入框模拟 Enter（部分时候 React 表单要靠 Enter 提交）
   button.click();
+
+  // 等一小会让 React 处理 click
+  await waitMs(150);
+
+  // 如果还在原页面（说明 click 没触发表单提交），追加 Enter
+  if (location.pathname.startsWith('/email-verification')) {
+    input.focus();
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
+    input.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
+
+    const form = input.closest('form');
+    if (form) {
+      const requestSubmit = (form as HTMLFormElement).requestSubmit?.bind(form);
+      try {
+        if (requestSubmit) {
+          requestSubmit();
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
   return ok('已填入验证码并点击继续');
 }
 

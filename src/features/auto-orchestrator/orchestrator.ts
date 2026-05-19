@@ -14,6 +14,14 @@ const LOG_PREFIX = '[OPX Auto]';
 const POLL_INTERVAL_MS = 2000;
 const SMS_POLL_INTERVAL_MS = 5000;
 const SMS_TIMEOUT_MS = 180_000;
+// 在验证码页停留多久没跳转就重试
+const OTP_PAGE_STUCK_MS = 20_000;
+// 同一次重试间至少间隔
+const OTP_RETRY_INTERVAL_MS = 8_000;
+
+// 这两个变量只在当前页面生命周期内有效，刷新即重置（不写入 storage）
+let otpStuckSince = 0;
+let lastOtpRetryAt = 0;
 
 let running = false;
 let pollTimer: number | null = null;
@@ -165,14 +173,77 @@ async function runStep(state: OrchestratorState): Promise<void> {
         await generateLinkAndRedirect(sessionResponse.session.accessToken);
         return;
       }
-      await setStep('fill-profile', '验证码已处理，等待资料页或登录跳转...');
+
+      // session 还没拿到，且页面还停在验证码页 → 可能是「继续」按钮没真的提交
+      // 在这里做卡住检测 + 重试
+      if (otpStuckSince === 0) {
+        otpStuckSince = Date.now();
+      }
+      const stuckFor = Date.now() - otpStuckSince;
+      const sinceLastRetry = Date.now() - lastOtpRetryAt;
+
+      if (stuckFor >= OTP_PAGE_STUCK_MS && sinceLastRetry >= OTP_RETRY_INTERVAL_MS) {
+        lastOtpRetryAt = Date.now();
+        await setStep('wait-otp', `页面卡在验证码页 ${Math.round(stuckFor / 1000)}s，尝试重新提交...`);
+
+        // 检查输入框现在的值
+        const otpInput = document.querySelector<HTMLInputElement>(
+          'input[name="code"], input[name="otp"], input[autocomplete="one-time-code"], input[inputmode="numeric"]',
+        );
+
+        // 如果输入框被 React 清空了或值变了，重新拉验证码并填
+        if (!otpInput?.value || otpInput.value.length < 4) {
+          console.warn(`${LOG_PREFIX} OTP 输入框为空，重新填写`);
+          // 把 wait-otp 从 completedSteps 里移掉，让下次 tick 重新走一次完整的填码流程
+          const newCompleted = state.completedSteps.filter((s) => s !== 'wait-otp');
+          await saveOrchestratorState({ completedSteps: newCompleted });
+          otpStuckSince = 0;
+          return;
+        }
+
+        // 输入框有值，只是按钮没真的点提交 → 强制再点一次
+        const button = findVerificationContinueButton();
+        if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
+          console.info(`${LOG_PREFIX} 重新点击「继续」按钮`);
+          button.click();
+        } else {
+          // 按钮拿不到或者被禁用 → 试试在输入框上敲 Enter
+          if (otpInput) {
+            console.info(`${LOG_PREFIX} 按钮不可用，对验证码输入框模拟回车`);
+            otpInput.focus();
+            otpInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+            otpInput.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+            otpInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+
+            // 也尝试 form.submit / requestSubmit
+            const form = otpInput.closest('form');
+            if (form) {
+              const requestSubmit = (form as HTMLFormElement).requestSubmit?.bind(form);
+              try {
+                requestSubmit ? requestSubmit() : (form as HTMLFormElement).submit();
+              } catch (e) {
+                console.warn(`${LOG_PREFIX} form submit 失败`, e);
+              }
+            }
+          }
+        }
+        return;
+      }
+
+      await setStep('fill-profile', `验证码已处理，等待资料页或登录跳转... (${Math.round(stuckFor / 1000)}s)`);
       return;
     }
+
+    // 还没填过验证码 → 走正常流程
+    otpStuckSince = 0;
+    lastOtpRetryAt = 0;
     await setStep('wait-otp', '检测到验证码页，正在等待 Outlook 验证码...');
     const controller = createRegisterController();
     const result = await controller.waitForOutlookOtp();
     if (result.ok) {
       await markCompleted('wait-otp', `验证码已填入：${result.code || ''}`);
+      // 重新开始计时，这样如果按钮点了不跳转，20s 后会重试
+      otpStuckSince = Date.now();
     } else {
       await setStep('error', result.message, result.message);
     }
@@ -639,6 +710,18 @@ function errorMessage(error: unknown): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 在 email-verification 页找「继续」按钮
+function findVerificationContinueButton(): HTMLButtonElement | null {
+  const submit = document.querySelector<HTMLButtonElement>('button[type="submit"]');
+  if (submit) {
+    return submit;
+  }
+  return Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find((button) => {
+    const text = (button.textContent || '').trim();
+    return text === '继续' || text.toLowerCase() === 'continue';
+  }) ?? null;
 }
 
 // --- PayPal 点击和地址填写辅助函数 ---
