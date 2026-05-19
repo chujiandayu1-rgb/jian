@@ -8,7 +8,8 @@ import type { SmsRelayFetchMessage, SmsRelayFetchResponse } from '../src/feature
 
 const DEFAULT_OUTLOOK_API_BASE = 'http://127.0.0.1:8787';
 const DEFAULT_TIMEOUT_MS = 180_000;
-const DEFAULT_INTERVAL_MS = 5_000;
+const DEFAULT_INTERVAL_MS = 2_000;
+const YXIANG_REQUEST_TIMEOUT_MS = 6_000;
 const ASSISTANT_SCRIPT_FILE = '/content-scripts/content.js';
 const ASSISTANT_URL_PREFIXES = [
   'https://chatgpt.com/',
@@ -82,12 +83,25 @@ async function waitForOutlookOtp(message: OutlookOtpMessage): Promise<OutlookOtp
   const intervalMs = message.intervalMs ?? DEFAULT_INTERVAL_MS;
   const apiBase = normalizeApiBase(message.apiBase || DEFAULT_OUTLOOK_API_BASE);
 
-  // 先清空收件箱，确保下次拿到的是最新验证码
+  // 记录开始前已经存在的验证码，避免拿到老邮件
+  // （如：用户上一次跑流程后邮箱里还遗留着旧验证码）
+  const seedCode = await peekExistingOtp(message.accountLine);
+  if (seedCode) {
+    console.info('[OPX] 启动前邮箱已有验证码（旧）:', seedCode, '将忽略，等待新邮件');
+  }
+
+  // 先尝试清空收件箱（仅在有 refresh_token 时生效）
   await clearInboxBeforePolling(message.accountLine);
 
   while (Date.now() <= deadline) {
     const result = await fetchLatestOtp(apiBase, message.accountLine, startedAt);
     if (result.ok && result.code) {
+      // 如果新拿到的验证码就是启动前那条，说明还是老的，继续等
+      if (seedCode && result.code === seedCode) {
+        console.info('[OPX] 拿到的还是启动前的旧验证码，继续等...');
+        await delay(intervalMs);
+        continue;
+      }
       return result;
     }
     if (!result.ok && result.fatal) {
@@ -100,6 +114,20 @@ async function waitForOutlookOtp(message: OutlookOtpMessage): Promise<OutlookOtp
     ok: false,
     message: '等待 Outlook 验证码超时',
   };
+}
+
+// 启动轮询前快速看一眼邮箱里现有的最新验证码
+// 如果有，说明是老的，要忽略；后面拿到不一样的才认
+async function peekExistingOtp(accountLine: string): Promise<string> {
+  const parts = accountLine.split('----').map((s) => s.trim());
+  const email = parts[0] || '';
+  if (!email) return '';
+  try {
+    const result = await fetchOtpFromYxiang(email);
+    return result?.ok ? (result.code || '') : '';
+  } catch {
+    return '';
+  }
 }
 
 // 清空收件箱，确保下次拿到的邮件是新的验证码
@@ -262,7 +290,92 @@ function extractOpenAiOtp(data: Record<string, unknown>): string {
 }
 
 // --- yxiang6 邮件 API（只需 email，不需要密码/token）---
-const YXIANG_API_BASE = 'http://yxiang6.com';
+// 必须用 www 域名 + Referer，否则服务端会拒绝
+const YXIANG_API_BASE = 'http://www.yxiang6.com';
+
+function buildYxiangHeaders(email: string): HeadersInit {
+  return {
+    'Accept': '*/*',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
+    'Referer': `${YXIANG_API_BASE}/boobar?email=${encodeURIComponent(email)}`,
+  };
+}
+
+async function fetchYxiangBox(
+  email: string,
+  boxType: 1 | 2,
+): Promise<{ ok: boolean; data: any[]; message: string; fatal?: boolean }> {
+  const url = `${YXIANG_API_BASE}/api/GetLastEmails?email=${encodeURIComponent(email)}&boxType=${boxType}&num=2`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), YXIANG_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: buildYxiangHeaders(email),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    if (!response.ok) {
+      return { ok: false, data: [], message: `yxiang6 API 返回 ${response.status}` };
+    }
+    const data = await response.json() as { code?: number; data?: any[]; message?: string };
+    if (data.code === 200 && Array.isArray(data.data)) {
+      return { ok: true, data: data.data, message: data.message || 'OK' };
+    }
+    return { ok: false, data: [], message: data.message || 'yxiang6 暂无邮件' };
+  } catch (error) {
+    clearTimeout(timer);
+    return { ok: false, data: [], message: `yxiang6 请求失败：${String(error)}` };
+  }
+}
+
+async function fetchOtpFromYxiang(email: string): Promise<(OutlookOtpResponse & { fatal?: boolean }) | null> {
+  // 并行查收件箱 + 垃圾箱（之前是串行，慢一倍）
+  const [inbox, spam] = await Promise.all([
+    fetchYxiangBox(email, 1),
+    fetchYxiangBox(email, 2),
+  ]);
+
+  // 合并所有邮件，按 Date 倒序（最新的在前）
+  const allMails: any[] = [];
+  if (inbox.ok) allMails.push(...inbox.data);
+  if (spam.ok) allMails.push(...spam.data);
+
+  if (allMails.length === 0) {
+    const msg = inbox.message || spam.message || '暂未收到验证码';
+    console.info('[OPX yxiang6]', msg);
+    return { ok: false, fatal: false, message: msg };
+  }
+
+  // 按时间倒序：最新的邮件优先
+  allMails.sort((a, b) => {
+    const da = parseYxiangDate(a?.Date || a?.date || '');
+    const db = parseYxiangDate(b?.Date || b?.date || '');
+    return db - da;
+  });
+
+  for (const mail of allMails) {
+    const code = extractOtpFromYxiangMail(mail);
+    if (code) {
+      const dateStr = String(mail?.Date || mail?.date || '');
+      console.info('[OPX yxiang6] 拿到验证码:', code, '邮件时间:', dateStr);
+      return { ok: true, code, message: `yxiang6 收到验证码：${code}` };
+    }
+  }
+
+  return { ok: false, fatal: false, message: 'yxiang6 找到邮件但未提取到验证码' };
+}
+
+// yxiang6 返回的 Date 是 "2026-05-20 02:51:53" 格式（北京时间）
+function parseYxiangDate(s: string): number {
+  if (!s) return 0;
+  // 把空格换成 T，让 Date 能解析
+  const isoLike = s.replace(' ', 'T');
+  const ts = Date.parse(isoLike);
+  return Number.isFinite(ts) ? ts : 0;
+}
 
 async function fetchOtpViaGraph(
   accountLine: string,
@@ -278,25 +391,17 @@ async function fetchOtpViaGraph(
   const clientId = parts[2] || '';
   const hasFullToken = refreshToken.length > 50;
 
-  // 策略1: 如果有完整 refresh_token，先用小苹果 API
-  if (hasFullToken && clientId) {
-    const appleResult = await fetchOtpFromAppleApi(email, clientId, refreshToken);
-    if (appleResult?.ok) {
-      return appleResult;
-    }
-    console.info('[OPX] 小苹果 API 未获取到，尝试 yxiang6...');
-  }
-
-  // 策略2: 用 yxiang6 API（只需 email）
+  // 主路：yxiang6（你确认的当前在用的 API，无需密码）
   const yxiangResult = await fetchOtpFromYxiang(email);
   if (yxiangResult?.ok) {
     return yxiangResult;
   }
 
-  // 策略3: 如果有 token 但小苹果失败了，返回小苹果的错误
+  // 兜底路：如果用户填了完整 refresh_token，尝试一次小苹果
+  // （没填就跳过，避免浪费时间）
   if (hasFullToken && clientId) {
     const appleResult = await fetchOtpFromAppleApi(email, clientId, refreshToken);
-    if (appleResult) {
+    if (appleResult?.ok) {
       return appleResult;
     }
   }
@@ -355,50 +460,6 @@ async function fetchOtpFromAppleApi(
     return { ok: false, message: '小苹果暂未收到验证码' };
   } catch (error) {
     return { ok: false, fatal: false, message: `小苹果 API 错误：${String(error)}` };
-  }
-}
-
-async function fetchOtpFromYxiang(email: string): Promise<(OutlookOtpResponse & { fatal?: boolean }) | null> {
-  try {
-    // yxiang6 API: /api/GetLastEmails?email=xxx&boxType=1&num=2 (收件箱)
-    const inboxUrl = `${YXIANG_API_BASE}/api/GetLastEmails?email=${encodeURIComponent(email)}&boxType=1&num=2`;
-    console.info('[OPX yxiang6] 请求收件箱:', email);
-
-    const response = await fetch(inboxUrl, { method: 'GET', cache: 'no-store' });
-    if (!response.ok) {
-      return { ok: false, fatal: false, message: `yxiang6 API 返回 ${response.status}` };
-    }
-
-    const data = await response.json() as { code?: number; data?: any[]; message?: string };
-    console.info('[OPX yxiang6] 响应 code:', data.code, 'data length:', data.data?.length);
-
-    if (data.code === 200 && Array.isArray(data.data)) {
-      for (const mail of data.data) {
-        const code = extractOtpFromYxiangMail(mail);
-        if (code) {
-          return { ok: true, code, message: `yxiang6 收到验证码：${code}` };
-        }
-      }
-    }
-
-    // 查垃圾箱 boxType=2
-    const spamUrl = `${YXIANG_API_BASE}/api/GetLastEmails?email=${encodeURIComponent(email)}&boxType=2&num=2`;
-    const spamResponse = await fetch(spamUrl, { method: 'GET', cache: 'no-store' });
-    if (spamResponse.ok) {
-      const spamData = await spamResponse.json() as { code?: number; data?: any[] };
-      if (spamData.code === 200 && Array.isArray(spamData.data)) {
-        for (const mail of spamData.data) {
-          const code = extractOtpFromYxiangMail(mail);
-          if (code) {
-            return { ok: true, code, message: `yxiang6(垃圾箱)收到验证码：${code}` };
-          }
-        }
-      }
-    }
-
-    return { ok: false, message: data.message || '暂未收到验证码' };
-  } catch (error) {
-    return { ok: false, fatal: false, message: `yxiang6 API 错误：${String(error)}` };
   }
 }
 

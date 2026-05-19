@@ -243,8 +243,9 @@ async function runStep(state: OrchestratorState): Promise<void> {
 
     await setStep('wait-payment-page', '支付页已到达，正在选择 PayPal 并填写地址...');
 
-    // 等待页面渲染
-    await delay(3000);
+    // 等待 Stripe payment element 加载完毕（最多 15 秒）
+    // 之前固定等 3 秒经常不够用（尤其是 JP 节点访问 Stripe 慢）
+    await delay(5000);
 
     // 获取随机地址
     const addressResponse = await browser.runtime.sendMessage({
