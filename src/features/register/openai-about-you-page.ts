@@ -55,9 +55,14 @@ export async function fillAboutYouAndCreate(): Promise<ActionResult> {
 
   // 模拟真实用户输入：focus → 清空 → 设值 → input/change 事件
   await fillInputLikeUser(nameInput, name);
-  await waitMs(200);
+  await waitMs(300);
   await fillInputLikeUser(ageInput, age);
-  await waitMs(200);
+  await waitMs(300);
+
+  // 验证是否真的填进去了
+  if (!nameInput.value && !ageInput.value) {
+    return fail('资料填写失败：值未写入输入框');
+  }
 
   const button = findCreateButton();
   if (!button) {
@@ -77,28 +82,47 @@ export async function fillAboutYouAndCreate(): Promise<ActionResult> {
 }
 
 async function fillInputLikeUser(input: HTMLInputElement, value: string): Promise<void> {
+  // 聚焦
   input.focus();
   input.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
   input.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+  await waitMs(100);
 
+  // 清空已有内容
+  input.select();
+  document.execCommand('selectAll');
+  document.execCommand('delete');
   await waitMs(50);
 
-  // 使用 React 兼容的方式设值
-  const proto = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-  if (proto?.set) {
-    proto.set.call(input, value);
-  } else {
-    input.value = value;
+  // 方法1：使用 execCommand insertText（对 React 兼容性最好）
+  const inserted = document.execCommand('insertText', false, value);
+
+  if (!inserted || input.value !== value) {
+    // 方法2：如果 execCommand 不行，用 React 内部 fiber hack
+    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(input),
+      'value',
+    )?.set || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+
+    if (nativeInputValueSetter) {
+      nativeInputValueSetter.call(input, value);
+    } else {
+      input.value = value;
+    }
+
+    // React 16+ 需要这个特殊的 InputEvent
+    input.dispatchEvent(new InputEvent('input', {
+      bubbles: true,
+      cancelable: true,
+      inputType: 'insertText',
+      data: value,
+    }));
   }
 
-  // 触发所有必要的事件
-  input.dispatchEvent(new Event('input', { bubbles: true }));
+  await waitMs(100);
+
+  // 触发 change 和 blur
   input.dispatchEvent(new Event('change', { bubbles: true }));
-  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true }));
-  input.dispatchEvent(new KeyboardEvent('keyup', { key: 'a', bubbles: true }));
-
-  await waitMs(50);
-
   input.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
   input.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
 }
