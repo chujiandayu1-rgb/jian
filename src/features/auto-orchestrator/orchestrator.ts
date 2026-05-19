@@ -329,25 +329,51 @@ async function runStep(state: OrchestratorState): Promise<void> {
   // --- auth.openai.com：可能是中间跳转或验证完成页 ---
   if (hostname === 'auth.openai.com') {
     // 如果验证码已处理完但页面没跳转（显示"已验证"），尝试直接获取 session
-    if (state.completedSteps.includes('wait-otp')) {
-      await setStep('fetch-session', '验证完成，正在尝试获取 session...');
+    if (state.completedSteps.includes('wait-otp') && !state.completedSteps.includes('fill-profile')) {
+      // 先检查是否是资料页（about-you），如果是就填写
+      if (isAboutYouPage()) {
+        await setStep('fill-profile', '检测到资料页，正在填写...');
+        const controller = createRegisterController();
+        const result = await controller.fillProfileAndCreate();
+        if (result.ok) {
+          await markCompleted('fill-profile', '资料已填写并提交');
+        } else {
+          await setStep('error', result.message, result.message);
+        }
+        return;
+      }
+
+      // 不是资料页，尝试获取 session（已注册的号可以直接拿到）
       const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
         type: 'opx:fetch-chatgpt-session',
       });
       if (sessionResponse?.ok && sessionResponse.session?.accessToken) {
-        // 能获取到 session 说明注册已完成，跳过资料填写直接生成链接
-        if (!state.completedSteps.includes('fill-profile')) {
-          await markCompleted('fill-profile', '已注册账号，跳过资料填写');
-        }
+        // 能获取到 session 说明注册已完成，跳过资料填写直接跳转
+        await markCompleted('fill-profile', '已注册账号，跳过资料填写');
         await markCompleted('fetch-session', `Session 已读取：${sessionResponse.session.email}`);
-        // 直接跳转到 chatgpt.com 触发后续链接生成
         window.location.href = 'https://chatgpt.com/';
         return;
       }
-      // 获取不到 session，可能还在跳转中，等一下
-      await setStep('fill-profile', '等待页面跳转...');
+
+      // 都不行，等待页面跳转（可能还在加载中）
+      await setStep('fill-profile', '验证完成，等待页面跳转到资料页...');
       return;
     }
+
+    // 资料已填完但还在 auth 页面，尝试获取 session 然后跳转
+    if (state.completedSteps.includes('fill-profile') && !state.completedSteps.includes('fetch-session')) {
+      const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
+        type: 'opx:fetch-chatgpt-session',
+      });
+      if (sessionResponse?.ok && sessionResponse.session?.accessToken) {
+        await markCompleted('fetch-session', `Session 已读取：${sessionResponse.session.email}`);
+        window.location.href = 'https://chatgpt.com/';
+        return;
+      }
+      await setStep('fetch-session', '资料已填，等待跳转到 chatgpt.com...');
+      return;
+    }
+
     await setStep(state.currentStep, '在 auth.openai.com 中间页，等待跳转...');
     return;
   }
