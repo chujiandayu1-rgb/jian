@@ -3,6 +3,7 @@ import { createRegisterController } from '../register/controller';
 import { isChatGptLoginPage } from '../register/chatgpt-auth-page';
 import { isEmailVerificationPage } from '../register/openai-email-verification-page';
 import { isAboutYouPage } from '../register/openai-about-you-page';
+import { fillPayOpenAiAddressNow } from '../address-autofill/pay-openai-autofill';
 import { fetchSmsRelayCode } from '../sms/poller';
 import type { OrchestratorState, OrchestratorStep } from './types';
 import type { CheckoutLinkResponse, ChatGptSessionResponse } from '../link-extractor/types';
@@ -254,16 +255,18 @@ async function runStep(state: OrchestratorState): Promise<void> {
     if (!state.completedSteps.includes('open-checkout')) {
       await markCompleted('open-checkout', '已到达支付页');
     }
+
+    if (state.completedSteps.includes('wait-payment-page')) {
+      await setStep('wait-payment-page', '支付页已填写，等待跳转 PayPal...');
+      return;
+    }
+
     await setStep('wait-payment-page', '支付页已到达，正在选择 PayPal 并填写地址...');
 
     // 等待页面渲染
-    await delay(2000);
+    await delay(3000);
 
-    // 直接点击 PayPal 选项
-    clickPaypalOption();
-    await delay(1000);
-
-    // 获取随机地址并填写
+    // 获取随机地址
     const addressResponse = await browser.runtime.sendMessage({
       type: 'opx:fetch-random-address',
       countryCode: 'US',
@@ -271,20 +274,27 @@ async function runStep(state: OrchestratorState): Promise<void> {
     });
 
     if (addressResponse?.ok && addressResponse?.address) {
-      const address = addressResponse.address;
-      // 填写地址字段
-      fillPaymentInput('#billingName', address.fullName);
-      fillPaymentSelect('#billingCountry', address.countryCode);
-      await delay(600);
-      fillPaymentInput('#billingAddressLine1', address.line1);
-      fillPaymentInput('#billingAddressLine2', address.line2);
-      fillPaymentInput('#billingLocality', address.city);
-      fillPaymentInput('#billingAdministrativeArea', address.state);
-      fillPaymentInput('#billingPostalCode', address.postalCode);
-      fillPaymentInput('#phoneNumber', address.phone);
-      // 勾选条款
-      checkTermsBoxes();
-      await setStep('wait-payment-page', `支付页已填写地址，等待跳转 PayPal...`);
+      // 使用 pay-openai-autofill 中完善的填充逻辑（包括点击 PayPal + 填写所有字段）
+      const fillResult = await fillPayOpenAiAddressNow(addressResponse.address);
+      if (fillResult.ok) {
+        await markCompleted('wait-payment-page', `支付页已填写 ${fillResult.filled} 项，等待跳转 PayPal...`);
+      } else {
+        // 回退到简单方式
+        clickPaypalOption();
+        await delay(1000);
+        const address = addressResponse.address;
+        fillPaymentInput('#billingName', address.fullName);
+        fillPaymentSelect('#billingCountry', address.countryCode);
+        await delay(600);
+        fillPaymentInput('#billingAddressLine1', address.line1);
+        fillPaymentInput('#billingAddressLine2', address.line2);
+        fillPaymentInput('#billingLocality', address.city);
+        fillPaymentInput('#billingAdministrativeArea', address.state);
+        fillPaymentInput('#billingPostalCode', address.postalCode);
+        fillPaymentInput('#phoneNumber', address.phone);
+        checkTermsBoxes();
+        await markCompleted('wait-payment-page', '支付页已填写地址（回退方式），等待跳转 PayPal...');
+      }
     } else {
       await setStep('wait-payment-page', '获取地址失败，等待手动操作...');
     }
