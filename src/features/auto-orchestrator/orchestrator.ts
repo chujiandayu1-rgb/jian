@@ -186,7 +186,8 @@ async function runStep(state: OrchestratorState): Promise<void> {
   }
 
   // --- chatgpt.com 主页：读取 session + 生成链接 ---
-  if (hostname === 'chatgpt.com' && !url.includes('/auth')) {
+  // 只有当页面上没有登录表单时才认为已登录
+  if (hostname === 'chatgpt.com' && !url.includes('/auth') && !isChatGptLoginPage()) {
     if (state.completedSteps.includes('generate-link') && state.generatedLink) {
       // 已经生成了链接，跳转过去
       await setStep('open-checkout', '正在打开支付链接...');

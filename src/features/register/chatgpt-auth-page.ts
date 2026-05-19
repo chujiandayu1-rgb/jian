@@ -13,7 +13,32 @@ const SUBMIT_SELECTORS = [
 ];
 
 export function isChatGptLoginPage(): boolean {
-  return location.hostname === 'chatgpt.com' && location.pathname.startsWith('/auth/login');
+  if (location.hostname !== 'chatgpt.com' && location.hostname !== 'auth.openai.com') {
+    return false;
+  }
+  // Explicit login path
+  if (location.pathname.startsWith('/auth/login')) {
+    return true;
+  }
+  // Login modal on chatgpt.com main page — detect by presence of email input
+  const emailInput = document.querySelector(
+    'input#email, input[name="email"], input[type="email"], input[autocomplete="email"]',
+  );
+  if (emailInput && isVisible(emailInput)) {
+    return true;
+  }
+  // auth.openai.com login page
+  if (location.hostname === 'auth.openai.com' && document.querySelector('input[name="email"], input[type="email"]')) {
+    return true;
+  }
+  return false;
+}
+
+function isVisible(element: Element): boolean {
+  const el = element as HTMLElement;
+  const style = window.getComputedStyle(el);
+  const rect = el.getBoundingClientRect();
+  return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
 }
 
 export async function fillEmailAndContinue(email: string): Promise<ActionResult> {
