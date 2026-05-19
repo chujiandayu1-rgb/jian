@@ -244,14 +244,34 @@ async function runStep(state: OrchestratorState): Promise<void> {
     return;
   }
 
-  // --- pay.openai.com：等待地址填写完成（自动填写由 pay-openai-autofill 负责） ---
+  // --- pay.openai.com：主动选择 PayPal + 填写地址 ---
   if (hostname === 'pay.openai.com') {
     if (!state.completedSteps.includes('open-checkout')) {
       await markCompleted('open-checkout', '已到达支付页');
     }
-    await setStep('wait-payment-page', '支付页已到达，地址自动填写中...');
-    // 地址填写由 initPayOpenAiAddressAutofill 自动处理
-    // 这里不做额外操作，等用户手动选 PayPal 或自动完成
+    await setStep('wait-payment-page', '支付页已到达，正在选择 PayPal 并填写地址...');
+
+    // 主动触发：选择 PayPal + 填写地址
+    const { initPayOpenAiAddressAutofill, fillPayOpenAiAddressNow } = await import('../address-autofill/pay-openai-autofill');
+    try {
+      initPayOpenAiAddressAutofill();
+    } catch { /* already initialized */ }
+
+    // 等待页面渲染
+    await delay(1500);
+
+    // 尝试点击 PayPal 并填写地址
+    const addressResponse = await browser.runtime.sendMessage({
+      type: 'opx:fetch-random-address',
+      countryCode: 'US',
+      city: '',
+    });
+    if (addressResponse?.ok && addressResponse?.address) {
+      const result = await fillPayOpenAiAddressNow(addressResponse.address);
+      if (result.ok) {
+        await setStep('wait-payment-page', `支付页已填写 ${result.filled} 项，等待跳转 PayPal...`);
+      }
+    }
     return;
   }
 
