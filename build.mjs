@@ -10,6 +10,21 @@ fs.mkdirSync(outdir, { recursive: true });
 fs.mkdirSync(path.join(outdir, 'content-scripts'), { recursive: true });
 fs.mkdirSync(path.join(outdir, 'icon'), { recursive: true });
 
+// esbuild plugin to replace `browser` with `chrome` globally
+const browserShimPlugin = {
+  name: 'browser-shim',
+  setup(build) {
+    build.onResolve({ filter: /^wxt\/browser$/ }, () => ({
+      path: 'wxt-browser-shim',
+      namespace: 'shim',
+    }));
+    build.onLoad({ filter: /.*/, namespace: 'shim' }, () => ({
+      contents: 'export const browser = globalThis.chrome || globalThis.browser;',
+      loader: 'js',
+    }));
+  },
+};
+
 // Build content script
 await esbuild.build({
   entryPoints: ['entrypoints/content.ts'],
@@ -17,30 +32,32 @@ await esbuild.build({
   outfile: path.join(outdir, 'content-scripts/content.js'),
   format: 'iife',
   target: 'chrome110',
-  define: {
-    'browser.runtime.sendMessage': 'chrome.runtime.sendMessage',
-    'browser.storage.local.get': 'chrome.storage.local.get',
-    'browser.storage.local.set': 'chrome.storage.local.set',
-    'browser.storage.onChanged.addListener': 'chrome.storage.onChanged.addListener',
-  },
+  plugins: [browserShimPlugin],
   banner: {
-    js: `// WXT globals shim
-const browser = chrome;
-function defineContentScript(opts) { opts.main(); }
+    js: `// OpenAI Plus VXT - Content Script
+(function() {
+  var browser = (typeof chrome !== 'undefined') ? chrome : (typeof browser !== 'undefined' ? browser : {});
+  function defineContentScript(opts) { opts.main(); }
 `,
   },
+  footer: {
+    js: `})();`,
+  },
+  // Don't wrap in another IIFE since we do it manually
+  globalName: undefined,
 });
 
-// Build background script
+// Build background script  
 await esbuild.build({
   entryPoints: ['entrypoints/background.ts'],
   bundle: true,
   outfile: path.join(outdir, 'background.js'),
   format: 'esm',
   target: 'chrome110',
+  plugins: [browserShimPlugin],
   banner: {
-    js: `// WXT globals shim
-const browser = chrome;
+    js: `// OpenAI Plus VXT - Background Service Worker
+const browser = (typeof chrome !== 'undefined') ? chrome : self.browser;
 function defineBackground(fn) { fn(); }
 `,
   },
@@ -51,7 +68,7 @@ const manifest = {
   manifest_version: 3,
   name: 'OpenAI Plus VXT',
   version: '0.0.3',
-  description: 'ChatGPT registration assistant extension with one-click automation',
+  description: 'ChatGPT Plus 一键注册+支付自动化',
   permissions: ['storage', 'tabs', 'scripting'],
   host_permissions: [
     'http://127.0.0.1:8787/*',
@@ -112,4 +129,12 @@ if (fs.existsSync(iconDir)) {
   }
 }
 
-console.log('Build complete! Extension at:', outdir);
+console.log('✅ Build complete!');
+console.log('   Extension at:', outdir);
+console.log('   Files:');
+for (const f of fs.readdirSync(outdir, { recursive: true })) {
+  const stat = fs.statSync(path.join(outdir, String(f)));
+  if (stat.isFile()) {
+    console.log(`     ${f} (${(stat.size / 1024).toFixed(1)} KB)`);
+  }
+}

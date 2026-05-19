@@ -1,4 +1,4 @@
-import { loadRegisterState, saveRegisterState, loadLinkExtractorState } from '../../app/state';
+import { loadRegisterState, saveRegisterState, loadLinkExtractorState, loadSmsRelayState } from '../../app/state';
 import { createRegisterController } from '../register/controller';
 import { isChatGptLoginPage } from '../register/chatgpt-auth-page';
 import { isEmailVerificationPage } from '../register/openai-email-verification-page';
@@ -378,11 +378,6 @@ function fillPaypalSmsCode(code: string): void {
       submitButton.click();
     }
   }, 500);
-}
-
-async function loadSmsRelayState() {
-  const { loadSmsRelayState: load } = await import('../../app/state');
-  return load();
 }
 
 function parseSmsTargets(rawInput: string): SmsRelayTarget[] {
