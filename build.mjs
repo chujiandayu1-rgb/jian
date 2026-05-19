@@ -81,6 +81,8 @@ const manifest = {
     'https://www.meiguodizhi.com/*',
     'https://api.github.com/*',
     'https://mail-api.yuecheng.shop/*',
+    'https://smscc.985008.xyz/*',
+    'https://*.985008.xyz/*',
   ],
   background: {
     service_worker: 'background.js',
