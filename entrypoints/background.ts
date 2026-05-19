@@ -231,18 +231,57 @@ function extractOpenAiOtp(data: Record<string, unknown>): string {
   return '';
 }
 
+// --- yxiang6 邮件 API（只需 email，不需要密码/token）---
+const YXIANG_API_BASE = 'http://yxiang6.com';
+
 async function fetchOtpViaGraph(
   accountLine: string,
   startedAt: number,
 ): Promise<(OutlookOtpResponse & { fatal?: boolean }) | null> {
   const parts = accountLine.split('----').map((s) => s.trim());
-  if (parts.length < 4 || !parts[2] || !parts[3]) {
+  const email = parts[0] || '';
+  if (!email) {
     return null;
   }
 
-  const [email, password, clientId, refreshToken] = parts;
+  const refreshToken = parts[3] || '';
+  const clientId = parts[2] || '';
+  const hasFullToken = refreshToken.length > 50;
 
-  // 调用小苹果 API 获取最新邮件
+  // 策略1: 如果有完整 refresh_token，先用小苹果 API
+  if (hasFullToken && clientId) {
+    const appleResult = await fetchOtpFromAppleApi(email, clientId, refreshToken);
+    if (appleResult?.ok) {
+      return appleResult;
+    }
+    console.info('[OPX] 小苹果 API 未获取到，尝试 yxiang6...');
+  }
+
+  // 策略2: 用 yxiang6 API（只需 email）
+  const yxiangResult = await fetchOtpFromYxiang(email);
+  if (yxiangResult?.ok) {
+    return yxiangResult;
+  }
+
+  // 策略3: 如果有 token 但小苹果失败了，返回小苹果的错误
+  if (hasFullToken && clientId) {
+    const appleResult = await fetchOtpFromAppleApi(email, clientId, refreshToken);
+    if (appleResult) {
+      return appleResult;
+    }
+  }
+
+  return yxiangResult || {
+    ok: false,
+    message: '暂未收到 OpenAI 验证码邮件',
+  };
+}
+
+async function fetchOtpFromAppleApi(
+  email: string,
+  clientId: string,
+  refreshToken: string,
+): Promise<(OutlookOtpResponse & { fatal?: boolean }) | null> {
   try {
     const params = new URLSearchParams({
       refresh_token: refreshToken,
@@ -253,37 +292,20 @@ async function fetchOtpViaGraph(
     });
 
     const apiUrl = `${MAIL_API_BASE}/api/mail-new?${params.toString()}`;
-    console.info('[OPX Mail API] 请求:', apiUrl.replace(refreshToken, '***'));
+    console.info('[OPX 小苹果] 请求 INBOX');
 
-    const response = await fetch(apiUrl, {
-      method: 'GET',
-      cache: 'no-store',
-    });
-
+    const response = await fetch(apiUrl, { method: 'GET', cache: 'no-store' });
     if (!response.ok) {
-      const errText = await response.text();
-      console.warn('[OPX Mail API] 请求失败:', response.status, errText);
-      return {
-        ok: false,
-        fatal: false,
-        message: `邮件 API 返回 ${response.status}：${errText.slice(0, 200)}`,
-      };
+      return { ok: false, fatal: false, message: `小苹果 API 返回 ${response.status}` };
     }
 
     const data = await response.json() as Record<string, unknown>;
-    console.info('[OPX Mail API] 响应:', JSON.stringify(data).slice(0, 500));
-
-    // 从返回数据中提取 OpenAI 验证码
     const code = extractOpenAiOtp(data);
     if (code) {
-      return {
-        ok: true,
-        code,
-        message: `邮件 API 收到验证码：${code}`,
-      };
+      return { ok: true, code, message: `小苹果收到验证码：${code}` };
     }
 
-    // 也尝试查垃圾箱
+    // 查垃圾箱
     const junkParams = new URLSearchParams({
       refresh_token: refreshToken,
       client_id: clientId,
@@ -291,33 +313,104 @@ async function fetchOtpViaGraph(
       mailbox: 'Junk',
       response_type: 'json',
     });
-
-    const junkUrl = `${MAIL_API_BASE}/api/mail-new?${junkParams.toString()}`;
-    const junkResponse = await fetch(junkUrl, { method: 'GET', cache: 'no-store' });
+    const junkResponse = await fetch(`${MAIL_API_BASE}/api/mail-new?${junkParams.toString()}`, { method: 'GET', cache: 'no-store' });
     if (junkResponse.ok) {
       const junkData = await junkResponse.json() as Record<string, unknown>;
       const junkCode = extractOpenAiOtp(junkData);
       if (junkCode) {
-        return {
-          ok: true,
-          code: junkCode,
-          message: `邮件 API (垃圾箱) 收到验证码：${junkCode}`,
-        };
+        return { ok: true, code: junkCode, message: `小苹果(垃圾箱)收到验证码：${junkCode}` };
       }
     }
 
-    return {
-      ok: false,
-      message: '暂未收到 OpenAI 验证码邮件',
-    };
+    return { ok: false, message: '小苹果暂未收到验证码' };
   } catch (error) {
-    console.warn('[OPX Mail API] 错误:', error);
-    return {
-      ok: false,
-      fatal: false,
-      message: `邮件 API 连接失败：${String(error)}`,
-    };
+    return { ok: false, fatal: false, message: `小苹果 API 错误：${String(error)}` };
   }
+}
+
+async function fetchOtpFromYxiang(email: string): Promise<(OutlookOtpResponse & { fatal?: boolean }) | null> {
+  try {
+    // yxiang6 API: /api/GetLastEmails?email=xxx&boxType=1&num=2 (收件箱)
+    const inboxUrl = `${YXIANG_API_BASE}/api/GetLastEmails?email=${encodeURIComponent(email)}&boxType=1&num=2`;
+    console.info('[OPX yxiang6] 请求收件箱:', email);
+
+    const response = await fetch(inboxUrl, { method: 'GET', cache: 'no-store' });
+    if (!response.ok) {
+      return { ok: false, fatal: false, message: `yxiang6 API 返回 ${response.status}` };
+    }
+
+    const data = await response.json() as { code?: number; data?: any[]; message?: string };
+    console.info('[OPX yxiang6] 响应 code:', data.code, 'data length:', data.data?.length);
+
+    if (data.code === 200 && Array.isArray(data.data)) {
+      for (const mail of data.data) {
+        const code = extractOtpFromYxiangMail(mail);
+        if (code) {
+          return { ok: true, code, message: `yxiang6 收到验证码：${code}` };
+        }
+      }
+    }
+
+    // 查垃圾箱 boxType=2
+    const spamUrl = `${YXIANG_API_BASE}/api/GetLastEmails?email=${encodeURIComponent(email)}&boxType=2&num=2`;
+    const spamResponse = await fetch(spamUrl, { method: 'GET', cache: 'no-store' });
+    if (spamResponse.ok) {
+      const spamData = await spamResponse.json() as { code?: number; data?: any[] };
+      if (spamData.code === 200 && Array.isArray(spamData.data)) {
+        for (const mail of spamData.data) {
+          const code = extractOtpFromYxiangMail(mail);
+          if (code) {
+            return { ok: true, code, message: `yxiang6(垃圾箱)收到验证码：${code}` };
+          }
+        }
+      }
+    }
+
+    return { ok: false, message: data.message || '暂未收到验证码' };
+  } catch (error) {
+    return { ok: false, fatal: false, message: `yxiang6 API 错误：${String(error)}` };
+  }
+}
+
+function extractOtpFromYxiangMail(mail: any): string {
+  const subject = String(mail?.subject || mail?.Subject || '');
+  const body = String(mail?.body || mail?.Body || mail?.content || mail?.Content || mail?.html || mail?.Html || '');
+  const text = String(mail?.text || mail?.Text || '');
+  const from = String(mail?.from || mail?.From || mail?.sender || '');
+
+  // 确认是 OpenAI 邮件
+  const fullText = `${from} ${subject} ${body} ${text}`;
+  const lower = fullText.toLowerCase();
+  if (!lower.includes('openai') && !lower.includes('chatgpt') && !lower.includes('验证码') && !lower.includes('verification')) {
+    return '';
+  }
+
+  // 从 text/body 里提取验证码
+  const searchText = `${text}\n${body}`;
+  const patterns = [
+    /验证码以继续[：:]\s*\n*\s*(\d{6})/,
+    /临时验证码[：:]\s*\n*\s*(\d{6})/,
+    /verification code[：:]\s*\n*\s*(\d{6})/i,
+    /\n(\d{6})\n/,
+    />\s*(\d{6})\s*</,
+  ];
+
+  for (const pattern of patterns) {
+    const match = pattern.exec(searchText);
+    if (match?.[1]) {
+      return match[1];
+    }
+  }
+
+  // 回退: 找独立行的 6 位数
+  const lines = searchText.split(/[\n\r]+/).map((l: string) => l.replace(/<[^>]*>/g, '').trim());
+  for (const line of lines) {
+    if (/^\d{6}$/.test(line)) {
+      return line;
+    }
+  }
+
+  return '';
 }
 
 function isOutlookOtpMessage(message: unknown): message is OutlookOtpMessage {

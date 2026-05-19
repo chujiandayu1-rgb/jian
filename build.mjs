@@ -87,6 +87,10 @@ const manifest = {
     'https://graph.microsoft.com/*',
     'https://apple.882263.xyz/*',
     'https://*.882263.xyz/*',
+    'http://yxiang6.com/*',
+    'http://www.yxiang6.com/*',
+    'https://yxiang6.com/*',
+    'https://www.yxiang6.com/*',
   ],
   background: {
     service_worker: 'background.js',
