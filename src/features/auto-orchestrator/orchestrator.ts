@@ -249,13 +249,20 @@ async function runStep(state: OrchestratorState): Promise<void> {
     if (!state.completedSteps.includes('open-checkout')) {
       await markCompleted('open-checkout', '已到达支付页');
     }
+
+    // 如果已经完成了支付页填写，不再重复操作
+    if (state.completedSteps.includes('wait-payment-page')) {
+      await setStep('wait-paypal-sms', '支付页已填写完成，等待跳转 PayPal...');
+      return;
+    }
+
     await setStep('wait-payment-page', '支付页已到达，正在选择 PayPal 并填写地址...');
 
     // 等待页面渲染
     await delay(2000);
 
     // 直接点击 PayPal 选项
-    clickPaypalOption();
+    const paypalClicked = clickPaypalOption();
     await delay(1000);
 
     // 获取随机地址并填写
@@ -279,9 +286,11 @@ async function runStep(state: OrchestratorState): Promise<void> {
       fillPaymentInput('#phoneNumber', address.phone);
       // 勾选条款
       checkTermsBoxes();
-      await setStep('wait-payment-page', `支付页已填写地址，等待跳转 PayPal...`);
+      // 标记已完成，避免重复填写
+      await markCompleted('wait-payment-page', '支付页已填写地址，等待跳转 PayPal...');
     } else {
-      await setStep('wait-payment-page', '获取地址失败，等待手动操作...');
+      // 获取地址失败时不标记完成，允许下次重试（但不会无限循环因为只在首次执行）
+      await setStep('wait-payment-page', '获取地址失败，等待重试...');
     }
     return;
   }
