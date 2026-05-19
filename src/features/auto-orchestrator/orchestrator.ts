@@ -3,6 +3,7 @@ import { createRegisterController } from '../register/controller';
 import { isChatGptLoginPage } from '../register/chatgpt-auth-page';
 import { isEmailVerificationPage } from '../register/openai-email-verification-page';
 import { isAboutYouPage } from '../register/openai-about-you-page';
+import { fillPayOpenAiAddressNow } from '../address-autofill/pay-openai-autofill';
 import { fetchSmsRelayCode } from '../sms/poller';
 import type { OrchestratorState, OrchestratorStep } from './types';
 import type { CheckoutLinkResponse, ChatGptSessionResponse } from '../link-extractor/types';
@@ -195,6 +196,11 @@ async function runStep(state: OrchestratorState): Promise<void> {
       return;
     }
 
+    // 如果已注册过的号，不需要填资料就直接到了 chatgpt.com，自动跳过 fill-profile
+    if (!state.completedSteps.includes('fill-profile')) {
+      await markCompleted('fill-profile', '已注册账号，跳过资料填写');
+    }
+
     if (!state.completedSteps.includes('fetch-session')) {
       await setStep('fetch-session', '正在读取 ChatGPT session...');
       const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
@@ -249,16 +255,18 @@ async function runStep(state: OrchestratorState): Promise<void> {
     if (!state.completedSteps.includes('open-checkout')) {
       await markCompleted('open-checkout', '已到达支付页');
     }
+
+    if (state.completedSteps.includes('wait-payment-page')) {
+      await setStep('wait-payment-page', '支付页已填写，等待跳转 PayPal...');
+      return;
+    }
+
     await setStep('wait-payment-page', '支付页已到达，正在选择 PayPal 并填写地址...');
 
     // 等待页面渲染
-    await delay(2000);
+    await delay(3000);
 
-    // 直接点击 PayPal 选项
-    clickPaypalOption();
-    await delay(1000);
-
-    // 获取随机地址并填写
+    // 获取随机地址
     const addressResponse = await browser.runtime.sendMessage({
       type: 'opx:fetch-random-address',
       countryCode: 'US',
@@ -266,20 +274,27 @@ async function runStep(state: OrchestratorState): Promise<void> {
     });
 
     if (addressResponse?.ok && addressResponse?.address) {
-      const address = addressResponse.address;
-      // 填写地址字段
-      fillPaymentInput('#billingName', address.fullName);
-      fillPaymentSelect('#billingCountry', address.countryCode);
-      await delay(600);
-      fillPaymentInput('#billingAddressLine1', address.line1);
-      fillPaymentInput('#billingAddressLine2', address.line2);
-      fillPaymentInput('#billingLocality', address.city);
-      fillPaymentInput('#billingAdministrativeArea', address.state);
-      fillPaymentInput('#billingPostalCode', address.postalCode);
-      fillPaymentInput('#phoneNumber', address.phone);
-      // 勾选条款
-      checkTermsBoxes();
-      await setStep('wait-payment-page', `支付页已填写地址，等待跳转 PayPal...`);
+      // 使用 pay-openai-autofill 中完善的填充逻辑（包括点击 PayPal + 填写所有字段）
+      const fillResult = await fillPayOpenAiAddressNow(addressResponse.address);
+      if (fillResult.ok) {
+        await markCompleted('wait-payment-page', `支付页已填写 ${fillResult.filled} 项，等待跳转 PayPal...`);
+      } else {
+        // 回退到简单方式
+        clickPaypalOption();
+        await delay(1000);
+        const address = addressResponse.address;
+        fillPaymentInput('#billingName', address.fullName);
+        fillPaymentSelect('#billingCountry', address.countryCode);
+        await delay(600);
+        fillPaymentInput('#billingAddressLine1', address.line1);
+        fillPaymentInput('#billingAddressLine2', address.line2);
+        fillPaymentInput('#billingLocality', address.city);
+        fillPaymentInput('#billingAdministrativeArea', address.state);
+        fillPaymentInput('#billingPostalCode', address.postalCode);
+        fillPaymentInput('#phoneNumber', address.phone);
+        checkTermsBoxes();
+        await markCompleted('wait-payment-page', '支付页已填写地址（回退方式），等待跳转 PayPal...');
+      }
     } else {
       await setStep('wait-payment-page', '获取地址失败，等待手动操作...');
     }
@@ -351,6 +366,15 @@ function isPaypalSmsVerificationPage(): boolean {
   if (smsInput) {
     return true;
   }
+
+  // PayPal 分位验证码输入框（每位一个 input，name 类似 ciBasic-0, ciBasic-1, ...）
+  const splitCodeInput = document.querySelector<HTMLInputElement>(
+    'input[name="ciBasic-0"], input[id="ci-ciBasic-0"], input[name^="ciBasic-"]',
+  );
+  if (splitCodeInput) {
+    return true;
+  }
+
   // 检查页面文字
   const bodyText = (document.body?.textContent || '').toLowerCase();
   return bodyText.includes('enter the code') ||
@@ -384,6 +408,81 @@ async function pollPaypalSms(): Promise<{ ok: boolean; code: string; message: st
 }
 
 function fillPaypalSmsCode(code: string): void {
+  // 先尝试填充分位验证码输入框（每位一个 input，name 类似 ciBasic-0, ciBasic-1, ...）
+  const splitInputs = document.querySelectorAll<HTMLInputElement>(
+    'input[name^="ciBasic-"]',
+  );
+  if (splitInputs.length > 0 && code.length >= splitInputs.length) {
+    const sortedInputs = Array.from(splitInputs).sort((a, b) => {
+      const indexA = parseInt(a.name.replace('ciBasic-', ''), 10) || 0;
+      const indexB = parseInt(b.name.replace('ciBasic-', ''), 10) || 0;
+      return indexA - indexB;
+    });
+
+    for (let i = 0; i < sortedInputs.length; i++) {
+      const input = sortedInputs[i];
+      const digit = code[i] || '';
+      const prototype = HTMLInputElement.prototype;
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+      if (descriptor?.set) {
+        descriptor.set.call(input, digit);
+      } else {
+        input.value = digit;
+      }
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    // 尝试点击提交按钮
+    setTimeout(() => {
+      const submitButton = document.querySelector<HTMLButtonElement>(
+        'button[type="submit"], button[data-testid="submit"], button.primary',
+      );
+      if (submitButton && !submitButton.disabled) {
+        submitButton.click();
+      }
+    }, 500);
+    return;
+  }
+
+  // 也兼容 id 为 ci-ciBasic-N 格式的分位输入
+  const splitInputsById = document.querySelectorAll<HTMLInputElement>(
+    'input[id^="ci-ciBasic-"]',
+  );
+  if (splitInputsById.length > 0 && code.length >= splitInputsById.length) {
+    const sortedInputs = Array.from(splitInputsById).sort((a, b) => {
+      const indexA = parseInt(a.id.replace('ci-ciBasic-', ''), 10) || 0;
+      const indexB = parseInt(b.id.replace('ci-ciBasic-', ''), 10) || 0;
+      return indexA - indexB;
+    });
+
+    for (let i = 0; i < sortedInputs.length; i++) {
+      const input = sortedInputs[i];
+      const digit = code[i] || '';
+      const prototype = HTMLInputElement.prototype;
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+      if (descriptor?.set) {
+        descriptor.set.call(input, digit);
+      } else {
+        input.value = digit;
+      }
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    // 尝试点击提交按钮
+    setTimeout(() => {
+      const submitButton = document.querySelector<HTMLButtonElement>(
+        'button[type="submit"], button[data-testid="submit"], button.primary',
+      );
+      if (submitButton && !submitButton.disabled) {
+        submitButton.click();
+      }
+    }, 500);
+    return;
+  }
+
+  // 回退到单输入框填充
   const smsInput = document.querySelector<HTMLInputElement>(
     'input[name="otpCode"], input[data-testid="otpCode"], input[aria-label*="验证码"], input[aria-label*="code" i], input[placeholder*="code" i]',
   );

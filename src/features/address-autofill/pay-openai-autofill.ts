@@ -69,6 +69,10 @@ export async function fillPayOpenAiAddressNow(address: AddressProfile): Promise<
 
   selectPaypalIfPresent();
   await delay(450);
+
+  // 选择 PayPal 后等待地址表单出现
+  await waitForAddressForm(3000);
+
   const filled = await fillCheckoutFields(address);
   return {
     ok: filled > 0,
@@ -115,6 +119,10 @@ async function fillCheckoutFields(address: AddressProfile): Promise<number> {
   }
 
   filled += fillInput('#billingAddressLine1', address.line1, true);
+  // 关闭 Google 地址建议下拉（填入地址后可能弹出）
+  dismissAutocompleteDropdown();
+  await delay(300);
+
   filled += fillInput('#billingAddressLine2', address.line2, true);
   filled += fillInput('#billingLocality', address.city, true);
   filled += fillSelectOrInput('#billingAdministrativeArea', address.state, [address.stateFull, address.state]);
@@ -122,6 +130,9 @@ async function fillCheckoutFields(address: AddressProfile): Promise<number> {
   filled += fillInput('#phoneNumber', address.phone, false);
 
   filled += fillByAutocomplete('billing address-line1', address.line1);
+  dismissAutocompleteDropdown();
+  await delay(300);
+
   filled += fillByAutocomplete('billing address-line2', address.line2);
   filled += fillByAutocomplete('billing address-level2', address.city);
   filled += fillByAutocomplete('billing postal-code', address.postalCode);
@@ -384,6 +395,56 @@ function cssEscape(value: string): string {
     return CSS.escape(value);
   }
   return value.replace(/"/g, '\\"');
+}
+
+function dismissAutocompleteDropdown(): void {
+  // 按 Escape 关闭 Google 地址建议下拉
+  const activeElement = document.activeElement as HTMLElement | null;
+  if (activeElement) {
+    activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+    activeElement.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', bubbles: true }));
+    activeElement.blur();
+  }
+
+  // 也尝试隐藏/移除 Google Places 下拉容器
+  const pacContainers = document.querySelectorAll<HTMLElement>('.pac-container');
+  for (const container of Array.from(pacContainers)) {
+    container.style.display = 'none';
+  }
+
+  // 点击 "手动输入地址" 链接（如果有的话）
+  const manualLinks = document.querySelectorAll<HTMLElement>('a, button, span, div');
+  for (const el of Array.from(manualLinks)) {
+    const text = normalizedText(el.textContent || '');
+    if (text.includes('enter address manually') || text.includes('手动输入地址') || text.includes('manual')) {
+      if (isVisible(el)) {
+        el.click();
+        break;
+      }
+    }
+  }
+}
+
+async function waitForAddressForm(timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  const selectors = [
+    '#billingName',
+    '#billingAddressLine1',
+    '#billingCountry',
+    'input[autocomplete="billing address-line1"]',
+    'input[name="billingName"]',
+  ];
+
+  while (Date.now() < deadline) {
+    for (const selector of selectors) {
+      const el = document.querySelector(selector);
+      if (el && isVisible(el)) {
+        return true;
+      }
+    }
+    await delay(300);
+  }
+  return false;
 }
 
 function delay(ms: number): Promise<void> {
