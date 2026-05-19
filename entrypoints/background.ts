@@ -174,6 +174,68 @@ async function fetchLatestOtp(
 const MAIL_API_BASE = 'https://apple.882263.xyz';
 const OTP_RE = /\b(\d{6})\b/;
 
+// 精准提取 OpenAI 验证码：
+// 1. 先确认是 OpenAI 的邮件（from/subject 包含 openai）
+// 2. 用多种模式匹配验证码，排除日期等干扰数字
+function extractOpenAiOtp(data: Record<string, unknown>): string {
+  const fullJson = JSON.stringify(data);
+
+  // 检查是否是 OpenAI 相关邮件
+  const lowerJson = fullJson.toLowerCase();
+  const isOpenAi = lowerJson.includes('openai') ||
+    lowerJson.includes('verify your email') ||
+    lowerJson.includes('verification code') ||
+    lowerJson.includes('验证码') ||
+    lowerJson.includes('noreply@tm.openai.com');
+
+  if (!isOpenAi) {
+    return '';
+  }
+
+  // 尝试从邮件 body/content 里提取
+  const body = String(
+    (data as any)?.body?.content ||
+    (data as any)?.body ||
+    (data as any)?.content ||
+    (data as any)?.html ||
+    (data as any)?.text ||
+    ''
+  );
+  const subject = String((data as any)?.subject || '');
+  const searchText = `${subject} ${body} ${fullJson}`;
+
+  // 模式1: "验证码是 123456" 或 "code is 123456" 或 "code: 123456"
+  const codePatterns = [
+    /(?:验证码|code|码)\s*(?:是|is|：|:)\s*(\d{6})/i,
+    /(?:enter|输入|use)\s+(?:the\s+)?(?:code\s+)?(\d{6})/i,
+    /(\d{6})\s*(?:是你的|is your|as your)/i,
+    />\s*(\d{6})\s*</,  // HTML tag 中间的独立 6 位数
+    /[\s"'](\d{6})[\s"']/,  // 被空格或引号包围的 6 位数
+  ];
+
+  for (const pattern of codePatterns) {
+    const match = pattern.exec(searchText);
+    if (match?.[1]) {
+      return match[1];
+    }
+  }
+
+  // 模式2: 直接找所有 6 位数字，排除明显不是验证码的（年份、日期等）
+  const allMatches = searchText.match(/\b(\d{6})\b/g) || [];
+  for (const candidate of allMatches) {
+    // 排除年份开头（如 202xxx）、00开头等
+    if (candidate.startsWith('20') && parseInt(candidate.slice(2, 4)) <= 26) {
+      continue; // 可能是日期 202305 之类
+    }
+    if (candidate === '000000') {
+      continue;
+    }
+    return candidate;
+  }
+
+  return '';
+}
+
 async function fetchOtpViaGraph(
   accountLine: string,
   startedAt: number,
@@ -216,14 +278,13 @@ async function fetchOtpViaGraph(
     const data = await response.json() as Record<string, unknown>;
     console.info('[OPX Mail API] 响应:', JSON.stringify(data).slice(0, 500));
 
-    // 从返回数据中提取验证码
-    const fullText = JSON.stringify(data);
-    const match = OTP_RE.exec(fullText);
-    if (match?.[1]) {
+    // 从返回数据中提取 OpenAI 验证码
+    const code = extractOpenAiOtp(data);
+    if (code) {
       return {
         ok: true,
-        code: match[1],
-        message: `邮件 API 收到验证码：${match[1]}`,
+        code,
+        message: `邮件 API 收到验证码：${code}`,
       };
     }
 
@@ -240,13 +301,12 @@ async function fetchOtpViaGraph(
     const junkResponse = await fetch(junkUrl, { method: 'GET', cache: 'no-store' });
     if (junkResponse.ok) {
       const junkData = await junkResponse.json() as Record<string, unknown>;
-      const junkText = JSON.stringify(junkData);
-      const junkMatch = OTP_RE.exec(junkText);
-      if (junkMatch?.[1]) {
+      const junkCode = extractOpenAiOtp(junkData);
+      if (junkCode) {
         return {
           ok: true,
-          code: junkMatch[1],
-          message: `邮件 API (垃圾箱) 收到验证码：${junkMatch[1]}`,
+          code: junkCode,
+          message: `邮件 API (垃圾箱) 收到验证码：${junkCode}`,
         };
       }
     }
