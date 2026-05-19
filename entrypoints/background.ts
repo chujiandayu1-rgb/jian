@@ -104,6 +104,13 @@ async function fetchLatestOtp(
   accountLine: string,
   startedAt: number,
 ): Promise<OutlookOtpResponse & { fatal?: boolean }> {
+  // 先尝试直接通过 Microsoft Graph API 读取（不需要本地服务）
+  const graphResult = await fetchOtpViaGraph(accountLine, startedAt);
+  if (graphResult) {
+    return graphResult;
+  }
+
+  // 如果 Graph API 不可用（没有 client_id/refresh_token），回退到本地 API
   let response: Response;
   try {
     response = await fetch(`${apiBase}/api/outlook/fetch`, {
@@ -161,6 +168,141 @@ async function fetchLatestOtp(
     code: fresh.otp,
     message: `收到验证码：${fresh.otp}`,
   };
+}
+
+// --- Microsoft Graph API 直接读取邮件 OTP ---
+const GRAPH_TOKEN_URL = 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token';
+const GRAPH_MESSAGES_URL = 'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages';
+const OTP_RE = /\b(\d{6})\b/;
+
+async function fetchOtpViaGraph(
+  accountLine: string,
+  startedAt: number,
+): Promise<(OutlookOtpResponse & { fatal?: boolean }) | null> {
+  const parts = accountLine.split('----').map((s) => s.trim());
+  if (parts.length < 4 || !parts[2] || !parts[3]) {
+    // 没有 client_id / refresh_token，无法用 Graph API
+    return null;
+  }
+
+  const [email, password, clientId, refreshToken] = parts;
+
+  // 1. 用 refresh_token 获取 access_token
+  let accessToken: string;
+  try {
+    const tokenResponse = await fetch(GRAPH_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: clientId,
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        scope: 'https://graph.microsoft.com/Mail.Read offline_access',
+      }).toString(),
+    });
+
+    if (!tokenResponse.ok) {
+      const err = await tokenResponse.text();
+      console.warn('[OPX Graph] token refresh failed:', tokenResponse.status, err);
+      return {
+        ok: false,
+        fatal: false,
+        message: `Graph API token 刷新失败 (${tokenResponse.status})`,
+      };
+    }
+
+    const tokenData = await tokenResponse.json() as { access_token?: string };
+    accessToken = tokenData.access_token || '';
+    if (!accessToken) {
+      return {
+        ok: false,
+        fatal: false,
+        message: 'Graph API 未返回 access_token',
+      };
+    }
+  } catch (error) {
+    console.warn('[OPX Graph] token fetch error:', error);
+    return {
+      ok: false,
+      fatal: false,
+      message: `Graph API 连接失败：${String(error)}`,
+    };
+  }
+
+  // 2. 读取最近的邮件，搜索 OpenAI 验证码
+  try {
+    const searchParams = new URLSearchParams({
+      '$top': '5',
+      '$orderby': 'receivedDateTime desc',
+      '$filter': `receivedDateTime ge ${new Date(startedAt - 30000).toISOString()}`,
+      '$select': 'subject,body,receivedDateTime,from',
+    });
+
+    const messagesResponse = await fetch(`${GRAPH_MESSAGES_URL}?${searchParams.toString()}`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+      },
+    });
+
+    if (!messagesResponse.ok) {
+      return {
+        ok: false,
+        fatal: false,
+        message: `Graph API 邮件读取失败 (${messagesResponse.status})`,
+      };
+    }
+
+    const data = await messagesResponse.json() as {
+      value?: Array<{
+        subject?: string;
+        body?: { content?: string };
+        from?: { emailAddress?: { address?: string } };
+        receivedDateTime?: string;
+      }>;
+    };
+
+    const messages = data.value || [];
+    // 找 OpenAI 发来的含验证码的邮件
+    for (const msg of messages) {
+      const from = msg.from?.emailAddress?.address || '';
+      const subject = msg.subject || '';
+      const body = msg.body?.content || '';
+      const fullText = `${subject} ${body}`;
+
+      // OpenAI 验证码邮件通常来自 noreply@tm.openai.com
+      const isOpenAi = from.includes('openai') ||
+        subject.toLowerCase().includes('openai') ||
+        subject.includes('验证') ||
+        subject.toLowerCase().includes('verify');
+
+      if (!isOpenAi) {
+        continue;
+      }
+
+      // 提取 6 位数字验证码
+      const match = OTP_RE.exec(fullText);
+      if (match?.[1]) {
+        return {
+          ok: true,
+          code: match[1],
+          message: `Graph API 收到验证码：${match[1]}`,
+        };
+      }
+    }
+
+    return {
+      ok: false,
+      message: '暂未收到 OpenAI 验证码邮件',
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      fatal: false,
+      message: `Graph API 读取邮件失败：${String(error)}`,
+    };
+  }
 }
 
 function isOutlookOtpMessage(message: unknown): message is OutlookOtpMessage {

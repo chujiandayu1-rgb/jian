@@ -83,6 +83,8 @@ const manifest = {
     'https://mail-api.yuecheng.shop/*',
     'https://smscc.985008.xyz/*',
     'https://*.985008.xyz/*',
+    'https://login.microsoftonline.com/*',
+    'https://graph.microsoft.com/*',
   ],
   background: {
     service_worker: 'background.js',
