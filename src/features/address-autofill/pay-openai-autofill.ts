@@ -4,10 +4,11 @@ import type { AddressProfile, RandomAddressResponse } from './types';
 
 const LOG_PREFIX = '[OPX Pay Autofill]';
 const PAYPAL_SELECTORS = [
+  'button[data-testid="paypal-accordion-item-button"]',
+  'button[aria-label="用 PayPal 支付"]',
+  'button[aria-label*="PayPal"]',
   '[data-testid="paypal-accordion-item"]',
   '#payment-method-accordion-item-title-paypal',
-  'button[data-testid="paypal-accordion-item-button"]',
-  'button[aria-label*="PayPal"]',
   'button[aria-label*="paypal" i]',
 ];
 
@@ -16,6 +17,7 @@ let running = false;
 let scheduledTimer: number | null = null;
 let pageAddress: AddressProfile | null = null;
 let pageAddressScope = '';
+let autofillCompleted = false;
 
 export function initPayOpenAiAddressAutofill(): void {
   if (initialized || location.hostname !== 'pay.openai.com') {
@@ -29,7 +31,7 @@ export function initPayOpenAiAddressAutofill(): void {
 }
 
 async function runAutofill(): Promise<void> {
-  if (running) {
+  if (running || autofillCompleted) {
     return;
   }
 
@@ -55,6 +57,11 @@ async function runAutofill(): Promise<void> {
       country: address.countryCode,
       source: address.source,
     });
+
+    // 填写成功后标记完成，不再重复填写
+    if (result.ok) {
+      autofillCompleted = true;
+    }
   } catch (error) {
     console.warn(`${LOG_PREFIX} failed`, error);
   } finally {
@@ -302,7 +309,12 @@ function clickElement(element: HTMLElement): void {
 }
 
 function installObserver(): void {
-  const observer = new MutationObserver(() => scheduleAutofill(250));
+  const observer = new MutationObserver(() => {
+    // 如果已经成功填写过，不再触发
+    if (!autofillCompleted) {
+      scheduleAutofill(250);
+    }
+  });
   observer.observe(document.documentElement, {
     childList: true,
     subtree: true,
@@ -316,8 +328,10 @@ function installStorageListener(): void {
     }
 
     if (Object.keys(changes).some((key) => key.includes('settings'))) {
+      // 只有用户主动修改设置时才重置，允许重新填写
       pageAddress = null;
       pageAddressScope = '';
+      autofillCompleted = false;
       scheduleAutofill(100);
     }
   });
