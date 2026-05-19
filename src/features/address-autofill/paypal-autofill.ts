@@ -176,11 +176,13 @@ async function fillPaypalSignupFields(address: AddressProfile, allowRetry: boole
   const email = await resolveEmail(address);
   const name = splitName(address.fullName);
   const expiry = parseExpiry(address.creditCard.expires);
+  const password = generatePassword(email);
+  const phone = await resolveSmsPhone(address);
 
   filled += fillText(PAYPAL_FIELDS.email, email, true);
-  filled += fillPasswordField(email);
-  renderPasswordEmailNote(email);
-  filled += fillText(PAYPAL_FIELDS.phone, address.phone, true);
+  filled += fillPasswordField(password);
+  renderPasswordEmailNote(email, password);
+  filled += fillText(PAYPAL_FIELDS.phone, phone, true);
   filled += fillText(PAYPAL_FIELDS.cardNumber, address.creditCard.number, true);
   filled += fillText(PAYPAL_FIELDS.expiry, expiry.short, true);
   filled += fillText(PAYPAL_FIELDS.csc, address.creditCard.cvv, true);
@@ -225,6 +227,43 @@ async function resolveEmail(address: AddressProfile): Promise<string> {
     return address.identity.temporaryMail;
   }
   return createOutlookEmail(address);
+}
+
+function generatePassword(email: string): string {
+  // 取邮箱 @ 前面的用户名部分 + "123" 作为密码
+  // 确保包含英文和数字，满足 PayPal 8-20字符要求
+  const username = email.split('@')[0] || 'password';
+  const base = username.replace(/[^a-zA-Z0-9]/g, '');
+  if (/\d/.test(base) && /[a-zA-Z]/.test(base) && base.length >= 8) {
+    return base;
+  }
+  // 如果用户名本身不含数字，追加 123
+  const password = base + '123';
+  return password.length >= 8 ? password : password + 'Aa1';
+}
+
+async function resolveSmsPhone(address: AddressProfile): Promise<string> {
+  // 优先从接码 tab 获取真实手机号
+  try {
+    const data = await browser.storage.local.get('opx.registerAssist.state');
+    const state = data['opx.registerAssist.state'];
+    if (state?.smsRelay?.rawInput) {
+      const lines = state.smsRelay.rawInput.split('\n').map((l: string) => l.trim()).filter(Boolean);
+      for (const line of lines) {
+        const sepIdx = line.indexOf('----');
+        if (sepIdx > 0) {
+          const phone = line.slice(0, sepIdx).trim();
+          if (phone && /^\+?\d{7,}$/.test(phone.replace(/[\s()-]/g, ''))) {
+            return phone;
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  // 兜底：用随机地址的手机号
+  return address.phone;
 }
 
 function fillText(selectors: string[], value: string, overwrite: boolean): number {
@@ -279,16 +318,16 @@ function fillPasswordField(value: string): number {
   return 1;
 }
 
-function renderPasswordEmailNote(email: string): void {
+function renderPasswordEmailNote(email: string, password: string): void {
   const anchor = findPasswordDisclaimerAnchor();
   if (!anchor) {
     return;
   }
 
-  fillPasswordField(email);
+  fillPasswordField(password);
 
   const noteId = 'opx-paypal-password-note';
-  const text = `当前密码和邮箱一致（${email}）`;
+  const text = `当前密码和邮箱一致（${email}）密码：${password}`;
   let note = document.getElementById(noteId);
   if (!note) {
     note = document.createElement('div');
