@@ -351,6 +351,15 @@ function isPaypalSmsVerificationPage(): boolean {
   if (smsInput) {
     return true;
   }
+
+  // PayPal 分位验证码输入框（每位一个 input，name 类似 ciBasic-0, ciBasic-1, ...）
+  const splitCodeInput = document.querySelector<HTMLInputElement>(
+    'input[name="ciBasic-0"], input[id="ci-ciBasic-0"], input[name^="ciBasic-"]',
+  );
+  if (splitCodeInput) {
+    return true;
+  }
+
   // 检查页面文字
   const bodyText = (document.body?.textContent || '').toLowerCase();
   return bodyText.includes('enter the code') ||
@@ -384,6 +393,81 @@ async function pollPaypalSms(): Promise<{ ok: boolean; code: string; message: st
 }
 
 function fillPaypalSmsCode(code: string): void {
+  // 先尝试填充分位验证码输入框（每位一个 input，name 类似 ciBasic-0, ciBasic-1, ...）
+  const splitInputs = document.querySelectorAll<HTMLInputElement>(
+    'input[name^="ciBasic-"]',
+  );
+  if (splitInputs.length > 0 && code.length >= splitInputs.length) {
+    const sortedInputs = Array.from(splitInputs).sort((a, b) => {
+      const indexA = parseInt(a.name.replace('ciBasic-', ''), 10) || 0;
+      const indexB = parseInt(b.name.replace('ciBasic-', ''), 10) || 0;
+      return indexA - indexB;
+    });
+
+    for (let i = 0; i < sortedInputs.length; i++) {
+      const input = sortedInputs[i];
+      const digit = code[i] || '';
+      const prototype = HTMLInputElement.prototype;
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+      if (descriptor?.set) {
+        descriptor.set.call(input, digit);
+      } else {
+        input.value = digit;
+      }
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    // 尝试点击提交按钮
+    setTimeout(() => {
+      const submitButton = document.querySelector<HTMLButtonElement>(
+        'button[type="submit"], button[data-testid="submit"], button.primary',
+      );
+      if (submitButton && !submitButton.disabled) {
+        submitButton.click();
+      }
+    }, 500);
+    return;
+  }
+
+  // 也兼容 id 为 ci-ciBasic-N 格式的分位输入
+  const splitInputsById = document.querySelectorAll<HTMLInputElement>(
+    'input[id^="ci-ciBasic-"]',
+  );
+  if (splitInputsById.length > 0 && code.length >= splitInputsById.length) {
+    const sortedInputs = Array.from(splitInputsById).sort((a, b) => {
+      const indexA = parseInt(a.id.replace('ci-ciBasic-', ''), 10) || 0;
+      const indexB = parseInt(b.id.replace('ci-ciBasic-', ''), 10) || 0;
+      return indexA - indexB;
+    });
+
+    for (let i = 0; i < sortedInputs.length; i++) {
+      const input = sortedInputs[i];
+      const digit = code[i] || '';
+      const prototype = HTMLInputElement.prototype;
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+      if (descriptor?.set) {
+        descriptor.set.call(input, digit);
+      } else {
+        input.value = digit;
+      }
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    // 尝试点击提交按钮
+    setTimeout(() => {
+      const submitButton = document.querySelector<HTMLButtonElement>(
+        'button[type="submit"], button[data-testid="submit"], button.primary',
+      );
+      if (submitButton && !submitButton.disabled) {
+        submitButton.click();
+      }
+    }, 500);
+    return;
+  }
+
+  // 回退到单输入框填充
   const smsInput = document.querySelector<HTMLInputElement>(
     'input[name="otpCode"], input[data-testid="otpCode"], input[aria-label*="验证码"], input[aria-label*="code" i], input[placeholder*="code" i]',
   );
