@@ -53,15 +53,11 @@ export async function fillAboutYouAndCreate(): Promise<ActionResult> {
   const name = randomName();
   const age = String(randomInt(25, 55));
 
-  setNativeValue(nameInput, name);
-  nameInput.dispatchEvent(new Event('input', { bubbles: true }));
-  nameInput.dispatchEvent(new Event('change', { bubbles: true }));
-
-  setNativeValue(ageInput, age);
-  ageInput.dispatchEvent(new Event('input', { bubbles: true }));
-  ageInput.dispatchEvent(new Event('change', { bubbles: true }));
-
-  await waitForUiTick();
+  // 模拟真实用户输入：focus → 清空 → 设值 → input/change 事件
+  await fillInputLikeUser(nameInput, name);
+  await waitMs(200);
+  await fillInputLikeUser(ageInput, age);
+  await waitMs(200);
 
   const button = findCreateButton();
   if (!button) {
@@ -69,7 +65,7 @@ export async function fillAboutYouAndCreate(): Promise<ActionResult> {
   }
 
   if (button.disabled) {
-    await waitForEnabled(button, 2500);
+    await waitForEnabled(button, 3000);
   }
 
   if (button.disabled) {
@@ -78,6 +74,37 @@ export async function fillAboutYouAndCreate(): Promise<ActionResult> {
 
   button.click();
   return ok(`已填写 ${name} / ${age} 并点击创建`);
+}
+
+async function fillInputLikeUser(input: HTMLInputElement, value: string): Promise<void> {
+  input.focus();
+  input.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+  input.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+
+  await waitMs(50);
+
+  // 使用 React 兼容的方式设值
+  const proto = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+  if (proto?.set) {
+    proto.set.call(input, value);
+  } else {
+    input.value = value;
+  }
+
+  // 触发所有必要的事件
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true }));
+  input.dispatchEvent(new KeyboardEvent('keyup', { key: 'a', bubbles: true }));
+
+  await waitMs(50);
+
+  input.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+  input.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+}
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function findNameInput(): HTMLInputElement | null {
