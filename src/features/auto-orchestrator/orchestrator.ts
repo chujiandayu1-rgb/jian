@@ -11,7 +11,9 @@ import type { SmsRelayTarget } from '../sms/types';
 
 const STORAGE_KEY = 'opx.orchestrator.state';
 const LOG_PREFIX = '[OPX Auto]';
-const POLL_INTERVAL_MS = 2000;
+// orchestrator 检查页面状态的间隔。1 秒比之前 2 秒快一倍，
+// 让"页面跳转 → 扩展识别"的延迟控制在 ≤ 1 秒
+const POLL_INTERVAL_MS = 1000;
 const SMS_POLL_INTERVAL_MS = 5000;
 const SMS_TIMEOUT_MS = 180_000;
 
@@ -153,21 +155,15 @@ async function runStep(state: OrchestratorState): Promise<void> {
   }
 
   // --- 邮箱验证码页：自动接收验证码 ---
+  // 思路对齐 suyancc：填完验证码点继续，**做完就放手**，让浏览器自然跳走。
+  // 不再在这里做"卡住自愈"或"等 session"——那些动作放到下面的 auth.openai.com 中间页分支里。
   if (isEmailVerificationPage()) {
     if (state.completedSteps.includes('wait-otp')) {
-      // 验证码已处理，先尝试获取 session（老号验证完直接登录，不需要资料页）
-      const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
-        type: 'opx:fetch-chatgpt-session',
-      });
-      if (sessionResponse?.ok && sessionResponse.session?.accessToken) {
-        await markCompleted('fill-profile', '老号已登录，跳过资料填写');
-        await markCompleted('fetch-session', `Session 已读取：${sessionResponse.session.email}`);
-        await generateLinkAndRedirect(sessionResponse.session.accessToken);
-        return;
-      }
-      await setStep('fill-profile', '验证码已处理，等待资料页或登录跳转...');
+      // 已经填过验证码了，啥都不做，等浏览器自己跳到 about-you / chatgpt.com / login_callback
+      await setStep('wait-otp', '验证码已提交，等待 OpenAI 跳转...');
       return;
     }
+
     await setStep('wait-otp', '检测到验证码页，正在等待 Outlook 验证码...');
     const controller = createRegisterController();
     const result = await controller.waitForOutlookOtp();
@@ -306,72 +302,18 @@ async function runStep(state: OrchestratorState): Promise<void> {
     return;
   }
 
-  // --- auth.openai.com：可能是中间跳转或验证完成页 ---
+  // --- auth.openai.com 中间跳转页：啥都不做，等浏览器自己跳 ---
+  // 思路对齐 suyancc：填完表单后让 OpenAI 自己处理跳转链路，
+  //   email-verification → (可能的) about-you → login_callback → chatgpt.com
+  // 我们只在「能识别到的具体页面」做事（about-you 在上面已经处理）。
+  // 中间页（/login_callback、/login、/）不做任何主动操作，等下一次 tick 时
+  // location 已经变成 chatgpt.com 了，分支自然进到 chatgpt.com 处理。
   if (hostname === 'auth.openai.com') {
-    // 1. 验证码刚处理完，处理资料页或已注册账号
-    if (state.completedSteps.includes('wait-otp') && !state.completedSteps.includes('fill-profile')) {
-      // 先检查是否是资料页（about-you），如果是就填写
-      if (isAboutYouPage()) {
-        await setStep('fill-profile', '检测到资料页，正在填写...');
-        const controller = createRegisterController();
-        const result = await controller.fillProfileAndCreate();
-        if (result.ok) {
-          await markCompleted('fill-profile', '资料已填写并提交');
-        } else {
-          await setStep('error', result.message, result.message);
-        }
-        return;
-      }
-
-      // 不是资料页，尝试获取 session（已注册的号可以直接拿到）
-      const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
-        type: 'opx:fetch-chatgpt-session',
-      });
-      if (sessionResponse?.ok && sessionResponse.session?.accessToken) {
-        // 能获取到 session 说明注册已完成
-        await markCompleted('fill-profile', '已注册账号，跳过资料填写');
-        await markCompleted('fetch-session', `Session 已读取：${sessionResponse.session.email}`);
-        // 直接生成链接并跳转，不必经过 chatgpt.com
-        await generateLinkAndRedirect(sessionResponse.session.accessToken);
-        return;
-      }
-
-      // 都不行，等待页面跳转（可能还在加载中）
-      await setStep('fill-profile', '验证完成，等待页面跳转到资料页...');
-      return;
+    if (state.completedSteps.includes('wait-otp')) {
+      await setStep(state.currentStep, '在 auth 中间页，等待跳转到 chatgpt.com...');
+    } else {
+      await setStep(state.currentStep, '在 auth 中间页，等待...');
     }
-
-    // 2. 资料填完但还在 auth 页面，轮询 session 然后直接生成链接 + 跳转支付页（不经过 chatgpt.com）
-    if (state.completedSteps.includes('fill-profile') && !state.completedSteps.includes('fetch-session')) {
-      await setStep('fetch-session', '资料已提交，正在读取 session...');
-      const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
-        type: 'opx:fetch-chatgpt-session',
-      });
-      if (sessionResponse?.ok && sessionResponse.session?.accessToken) {
-        await markCompleted('fetch-session', `Session 已读取：${sessionResponse.session.email}`);
-        // 直接生成订阅链接，跳过 chatgpt.com 中转
-        await generateLinkAndRedirect(sessionResponse.session.accessToken);
-        return;
-      }
-      await setStep('fetch-session', 'Session 还未生成，继续等待...');
-      return;
-    }
-
-    // 3. session 已读取但链接还没生成（极少见，可能跳转失败）
-    if (state.completedSteps.includes('fetch-session') && !state.completedSteps.includes('generate-link')) {
-      const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
-        type: 'opx:fetch-chatgpt-session',
-      });
-      const token = sessionResponse?.session?.accessToken || '';
-      if (token) {
-        await generateLinkAndRedirect(token);
-        return;
-      }
-      await setStep('generate-link', '等待 session...');
-      return;
-    }
-
-    await setStep(state.currentStep, '在 auth.openai.com 中间页，等待跳转...');
     return;
   }
 }

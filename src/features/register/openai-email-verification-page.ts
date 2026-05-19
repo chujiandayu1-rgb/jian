@@ -31,14 +31,14 @@ export async function fillOtpAndContinue(code: string): Promise<ActionResult> {
     return fail('没有找到验证码输入框');
   }
 
-  // 使用 React 兼容的方式输入（execCommand insertText 模拟真实键盘）
-  await fillInputLikeUser(input, normalized);
-  await waitMs(200);
+  // 关键修复：用 HTMLInputElement.prototype 上的原生 setter（绕过 React 的受控组件 wrapper）
+  // 这是 React 表单的标准 hack：让 React 检测到值变了并重新跑 onChange
+  setNativeValue(input, normalized);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
 
-  // 验证值是否真的填进去了
-  if (!input.value) {
-    return fail('验证码未写入输入框（React 框架兼容问题）');
-  }
+  // 等 React 一个渲染周期，按钮 disabled 状态会被解除
+  await waitMs(60);
 
   const button = findContinueButton();
   if (!button) {
@@ -46,7 +46,7 @@ export async function fillOtpAndContinue(code: string): Promise<ActionResult> {
   }
 
   if (button.disabled) {
-    await waitForEnabled(button, 3000);
+    await waitForEnabled(button, 2500);
   }
 
   if (button.disabled) {
@@ -54,51 +54,33 @@ export async function fillOtpAndContinue(code: string): Promise<ActionResult> {
   }
 
   button.click();
+
+  // 兜底：等 150ms 看页面有没有跳走，没跳走就模拟 Enter + form.requestSubmit
+  await waitMs(150);
+  if (location.pathname.startsWith('/email-verification')) {
+    input.focus();
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
+    input.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
+
+    const form = input.closest('form');
+    if (form) {
+      try {
+        (form as HTMLFormElement).requestSubmit?.();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
   return ok('已填入验证码并点击继续');
 }
 
-async function fillInputLikeUser(input: HTMLInputElement, value: string): Promise<void> {
-  // 聚焦
-  input.focus();
-  input.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
-  input.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
-  await waitMs(100);
-
-  // 清空已有内容
-  input.select();
-  document.execCommand('selectAll');
-  document.execCommand('delete');
-  await waitMs(50);
-
-  // 方法1：使用 execCommand insertText（对 React 兼容性最好）
-  const inserted = document.execCommand('insertText', false, value);
-
-  if (!inserted || input.value !== value) {
-    // 方法2：如果 execCommand 不行，用 native value setter + InputEvent
-    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-      Object.getPrototypeOf(input),
-      'value',
-    )?.set || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-
-    if (nativeInputValueSetter) {
-      nativeInputValueSetter.call(input, value);
-    } else {
-      input.value = value;
-    }
-
-    // React 16+ 需要这个特殊的 InputEvent
-    input.dispatchEvent(new InputEvent('input', {
-      bubbles: true,
-      cancelable: true,
-      inputType: 'insertText',
-      data: value,
-    }));
-  }
-
-  await waitMs(100);
-
-  // 触发 change（注意：不要立即 blur，可能会让 React 校验前清空）
-  input.dispatchEvent(new Event('change', { bubbles: true }));
+// 对方版本同款的 setNativeValue：用 HTMLInputElement.prototype 而不是 getPrototypeOf(input)
+// 后者在 React 受控组件下会拿到 React 包过的 setter，导致值看似填进去了但 React 不认。
+function setNativeValue(input: HTMLInputElement, value: string): void {
+  const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+  descriptor?.set?.call(input, value);
 }
 
 function waitMs(ms: number): Promise<void> {
