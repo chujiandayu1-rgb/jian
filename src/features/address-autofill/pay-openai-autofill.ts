@@ -67,11 +67,27 @@ export async function fillPayOpenAiAddressNow(address: AddressProfile): Promise<
     return { ok: false, filled: 0, message: '当前不是 pay.openai.com 页面' };
   }
 
-  selectPaypalIfPresent();
+  // 等待 PayPal 选项出现（Stripe payment element 异步加载，可能要 5-10 秒）
+  const paypalReady = await waitForPaypalOption(15000);
+  if (!paypalReady) {
+    console.warn(`${LOG_PREFIX} PayPal 选项等待超时，尝试强制继续`);
+  }
+
+  // 选择 PayPal（带重试）
+  let selected = selectPaypalIfPresent();
+  if (!selected) {
+    await delay(1000);
+    selected = selectPaypalIfPresent();
+  }
+  if (!selected) {
+    await delay(2000);
+    selected = selectPaypalIfPresent();
+  }
+
   await delay(450);
 
   // 选择 PayPal 后等待地址表单出现
-  await waitForAddressForm(3000);
+  await waitForAddressForm(5000);
 
   const filled = await fillCheckoutFields(address);
   return {
@@ -179,12 +195,21 @@ function selectPaypalIfPresent(): boolean {
     return true;
   }
 
-  // 最后回退：通过文本匹配
-  const textMatch = Array.from(document.querySelectorAll<HTMLElement>('div, span, label'))
+  // GuJumpgate 的方式：通过 data-testid 匹配
+  const hostedButton = document.querySelector<HTMLElement>('[data-testid="paypal-accordion-item-button"]')
+    || document.querySelector<HTMLElement>('.paypal-accordion-item button');
+  if (hostedButton && isVisible(hostedButton)) {
+    clickElement(hostedButton);
+    console.info(`${LOG_PREFIX} 已点击 hosted PayPal button (GuJumpgate 方式)`);
+    return true;
+  }
+
+  // 最后回退：通过文本匹配（扩大搜索范围，加 button/a/label）
+  const textMatch = Array.from(document.querySelectorAll<HTMLElement>('div, span, label, button, a, [role="radio"], [role="button"]'))
     .filter(isVisible)
     .find((element) => {
       const text = normalizedText(element.textContent);
-      return text === 'paypal';
+      return text === 'paypal' || text === 'pay pal';
     });
 
   if (textMatch) {
@@ -194,6 +219,29 @@ function selectPaypalIfPresent(): boolean {
   }
 
   console.warn(`${LOG_PREFIX} 未找到 PayPal 选项`);
+  return false;
+}
+
+// 轮询等待 PayPal 选项出现在 DOM 中
+async function waitForPaypalOption(timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    for (const selector of PAYPAL_SELECTORS) {
+      const el = document.querySelector(selector);
+      if (el && isVisible(el as HTMLElement)) {
+        console.info(`${LOG_PREFIX} PayPal 选项已出现: ${selector}`);
+        return true;
+      }
+    }
+    // 也用文本匹配检查
+    const textEl = Array.from(document.querySelectorAll<HTMLElement>('div, span, label, button'))
+      .find((el) => isVisible(el) && normalizedText(el.textContent) === 'paypal');
+    if (textEl) {
+      console.info(`${LOG_PREFIX} PayPal 选项已出现（文本匹配）`);
+      return true;
+    }
+    await delay(500);
+  }
   return false;
 }
 
