@@ -310,16 +310,32 @@ async function runStep(state: OrchestratorState): Promise<void> {
       return;
     }
 
-    // 2. 如果在 PayPal 注册页，自动点击"同意并创建账户"按钮
+    // 2. 如果在 PayPal 注册页，检查表单是否已填写完毕，然后自动点击"同意并创建账户"
     const agreeBtn = findPaypalAgreeButton();
     if (agreeBtn) {
+      // 检查按钮是否可点击（非 disabled）
+      const btnEl = agreeBtn as HTMLButtonElement;
+      if (btnEl.disabled) {
+        await setStep('wait-paypal-sms', 'PayPal 注册页填写中，等待表单完成...');
+        return;
+      }
       await setStep('wait-paypal-sms', 'PayPal 注册页，正在点击"同意并创建账户"...');
+      await delay(500);
       clickElementFull(agreeBtn);
+      await delay(3000);
+      return;
+    }
+
+    // 3. 检查是否有"登录"按钮（已有账号的情况，点击登录）
+    const loginBtn = findPaypalLoginButton();
+    if (loginBtn) {
+      await setStep('wait-paypal-sms', 'PayPal 登录页，正在点击"登录"...');
+      clickElementFull(loginBtn);
       await delay(2000);
       return;
     }
 
-    // 3. PayPal 注册页面的卡号地址等由 paypal-autofill 自动处理
+    // 4. PayPal 注册页面的卡号地址等由 paypal-autofill 自动处理
     // 这里我们处理短信验证码
     if (isPaypalSmsVerificationPage()) {
       await setStep('wait-paypal-sms', '检测到 PayPal 短信验证页，正在接码...');
@@ -333,7 +349,7 @@ async function runStep(state: OrchestratorState): Promise<void> {
         await setStep('wait-paypal-sms', smsResult.message);
       }
     } else {
-      await setStep('wait-paypal-sms', 'PayPal 页面填写中，等待短信验证...');
+      await setStep('wait-paypal-sms', 'PayPal 页面处理中，等待...');
     }
     return;
   }
@@ -600,6 +616,7 @@ function findPaypalCreateAccountButton(): HTMLElement | null {
     'button[data-testid="createAccount"]',
     '#createAccount',
     'a#createAccount',
+    'a[href*="webapps/mpp/account-selection"]',
   ];
 
   for (const selector of selectors) {
@@ -609,13 +626,50 @@ function findPaypalCreateAccountButton(): HTMLElement | null {
     }
   }
 
-  // 通过文本匹配
+  // 通过文本匹配 - 中英文
   const keywords = ['创建一个帐户', '创建一个账户', '创建帐户', '创建账户', 'create an account', 'sign up', 'create account'];
   const candidates = document.querySelectorAll<HTMLElement>('a, button, [role="button"], [role="link"]');
   for (const el of Array.from(candidates)) {
     if (!isElementVisible(el)) continue;
     const text = (el.textContent || '').trim().toLowerCase();
-    if (keywords.some(kw => text.includes(kw.toLowerCase()))) {
+    if (keywords.some(kw => text.includes(kw.toLowerCase())) && text.length < 50) {
+      return el;
+    }
+  }
+
+  return null;
+}
+
+/** 在 PayPal 登录页找到"登录"按钮 */
+function findPaypalLoginButton(): HTMLElement | null {
+  // 只在有邮箱和密码都填好的情况下才点登录
+  const emailInput = document.querySelector<HTMLInputElement>('input[type="email"], input[name="login_email"], #email');
+  const passwordInput = document.querySelector<HTMLInputElement>('input[type="password"], input[name="login_password"], #password');
+
+  if (!emailInput || !passwordInput) return null;
+  if (!emailInput.value.trim() || !passwordInput.value.trim()) return null;
+
+  const selectors = [
+    '#btnLogin',
+    'button[type="submit"]#btnLogin',
+    'button[name="btnLogin"]',
+    'button[data-testid="btnLogin"]',
+  ];
+
+  for (const selector of selectors) {
+    const el = document.querySelector<HTMLElement>(selector);
+    if (el && isElementVisible(el) && !(el as HTMLButtonElement).disabled) {
+      return el;
+    }
+  }
+
+  // 通过文本匹配
+  const keywords = ['登录', 'log in', 'login', 'sign in'];
+  const buttons = document.querySelectorAll<HTMLElement>('button[type="submit"], button');
+  for (const el of Array.from(buttons)) {
+    if (!isElementVisible(el) || (el as HTMLButtonElement).disabled) continue;
+    const text = (el.textContent || '').trim().toLowerCase();
+    if (keywords.some(kw => text === kw || text.includes(kw)) && text.length < 20) {
       return el;
     }
   }
@@ -627,30 +681,48 @@ function findPaypalCreateAccountButton(): HTMLElement | null {
 function findPaypalAgreeButton(): HTMLElement | null {
   // 精确选择器
   const selectors = [
-    'button[type="submit"]#submitButton',
     'button#submitButton',
+    'button[type="submit"]#submitButton',
     'button[data-testid="submitButton"]',
     'button[type="submit"][name="submit"]',
+    'button[type="submit"].btn-primary',
+    'button[type="submit"].vx_btn-primary',
   ];
 
   for (const selector of selectors) {
     const el = document.querySelector<HTMLElement>(selector);
     if (el && isElementVisible(el)) {
       const text = (el.textContent || '').toLowerCase();
+      // 确保是创建账户相关的按钮
       if (text.includes('同意') || text.includes('创建') || text.includes('agree') || text.includes('create')) {
         return el;
       }
     }
   }
 
-  // 通过文本匹配 submit 按钮
-  const keywords = ['同意并创建账户', '同意并创建帐户', 'agree and create account', '同意并创建'];
+  // 通过文本匹配 submit 按钮 - 中英文关键词
+  const keywords = [
+    '同意并创建账户', '同意并创建帐户', '同意并创建',
+    'agree and create account', 'agree & create account',
+    'agree and create', 'create account',
+  ];
   const buttons = document.querySelectorAll<HTMLElement>('button[type="submit"], button, [role="button"]');
   for (const el of Array.from(buttons)) {
     if (!isElementVisible(el)) continue;
     const text = (el.textContent || '').trim().toLowerCase();
-    if (keywords.some(kw => text.includes(kw.toLowerCase()))) {
+    if (keywords.some(kw => text.includes(kw.toLowerCase())) && text.length < 50) {
       return el;
+    }
+  }
+
+  // 最后的兜底：找页面上最大的 submit 按钮，如果页面包含"创建账户"相关文字
+  const bodyText = (document.body?.textContent || '').toLowerCase();
+  const isSignupPage = bodyText.includes('创建账户') || bodyText.includes('create account') || bodyText.includes('创建帐户');
+  if (isSignupPage) {
+    const submitBtns = Array.from(document.querySelectorAll<HTMLElement>('button[type="submit"]'))
+      .filter(el => isElementVisible(el) && !(el as HTMLButtonElement).disabled);
+    if (submitBtns.length === 1) {
+      return submitBtns[0];
     }
   }
 
