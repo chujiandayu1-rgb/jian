@@ -174,65 +174,60 @@ async function fetchLatestOtp(
 const MAIL_API_BASE = 'https://apple.882263.xyz';
 const OTP_RE = /\b(\d{6})\b/;
 
-// 精准提取 OpenAI 验证码：
-// 1. 先确认是 OpenAI 的邮件（from/subject 包含 openai）
-// 2. 用多种模式匹配验证码，排除日期等干扰数字
+// 精准提取 OpenAI 验证码
+// API 返回格式: { code: 200, success: true, data: { send, subject, text, html, date }, new_refresh_token }
+// 验证码在 data.text 里: "输入此临时验证码以继续：\n\n273783\n\n"
 function extractOpenAiOtp(data: Record<string, unknown>): string {
-  const fullJson = JSON.stringify(data);
+  // 小苹果 API 返回结构: data.data.text 或 data.data.html
+  const mailData = (data as any)?.data;
+  const text = String(mailData?.text || '');
+  const subject = String(mailData?.subject || '');
+  const send = String(mailData?.send || '');
 
-  // 检查是否是 OpenAI 相关邮件
-  const lowerJson = fullJson.toLowerCase();
-  const isOpenAi = lowerJson.includes('openai') ||
-    lowerJson.includes('verify your email') ||
-    lowerJson.includes('verification code') ||
-    lowerJson.includes('验证码') ||
-    lowerJson.includes('noreply@tm.openai.com');
-
-  if (!isOpenAi) {
-    return '';
-  }
-
-  // 尝试从邮件 body/content 里提取
-  const body = String(
-    (data as any)?.body?.content ||
-    (data as any)?.body ||
-    (data as any)?.content ||
-    (data as any)?.html ||
-    (data as any)?.text ||
-    ''
-  );
-  const subject = String((data as any)?.subject || '');
-  const searchText = `${subject} ${body} ${fullJson}`;
-
-  // 模式1: "验证码是 123456" 或 "code is 123456" 或 "code: 123456"
-  const codePatterns = [
-    /(?:验证码|code|码)\s*(?:是|is|：|:)\s*(\d{6})/i,
-    /(?:enter|输入|use)\s+(?:the\s+)?(?:code\s+)?(\d{6})/i,
-    /(\d{6})\s*(?:是你的|is your|as your)/i,
-    />\s*(\d{6})\s*</,  // HTML tag 中间的独立 6 位数
-    /[\s"'](\d{6})[\s"']/,  // 被空格或引号包围的 6 位数
+  // 优先从纯文本 text 里提取（最可靠）
+  // OpenAI 邮件格式: "输入此临时验证码以继续：\n\n273783\n\n"
+  const textPatterns = [
+    /验证码以继续[：:]\s*\n*\s*(\d{6})/,
+    /临时验证码[：:]\s*\n*\s*(\d{6})/,
+    /verification code[：:]\s*\n*\s*(\d{6})/i,
+    /code to continue[：:]\s*\n*\s*(\d{6})/i,
+    /\n(\d{6})\n/,  // 单独一行的 6 位数字
   ];
 
-  for (const pattern of codePatterns) {
-    const match = pattern.exec(searchText);
+  for (const pattern of textPatterns) {
+    const match = pattern.exec(text);
     if (match?.[1]) {
+      console.info('[OPX OTP] 从 text 提取到验证码:', match[1]);
       return match[1];
     }
   }
 
-  // 模式2: 直接找所有 6 位数字，排除明显不是验证码的（年份、日期等）
-  const allMatches = searchText.match(/\b(\d{6})\b/g) || [];
-  for (const candidate of allMatches) {
-    // 排除年份开头（如 202xxx）、00开头等
-    if (candidate.startsWith('20') && parseInt(candidate.slice(2, 4)) <= 26) {
-      continue; // 可能是日期 202305 之类
+  // 从 HTML 里提取（验证码通常在一个独立的 <p> 标签里，字体大）
+  const html = String(mailData?.html || '');
+  const htmlPatterns = [
+    /font-size:\s*24px[^>]*>\s*(?:<!--.*?-->)?\s*(\d{6})\s*(?:<!--.*?-->)?\s*<\/p>/s,
+    /padding:\s*28px[^>]*>\s*(?:<!--.*?-->)?\s*(\d{6})\s*(?:<!--.*?-->)?\s*<\/p>/s,
+    /border-radius:\s*16px[^>]*>\s*(?:<!--.*?-->)?\s*(\d{6})\s*(?:<!--.*?-->)?\s*<\/p>/s,
+  ];
+
+  for (const pattern of htmlPatterns) {
+    const match = pattern.exec(html);
+    if (match?.[1]) {
+      console.info('[OPX OTP] 从 html 提取到验证码:', match[1]);
+      return match[1];
     }
-    if (candidate === '000000') {
-      continue;
-    }
-    return candidate;
   }
 
+  // 最后回退: 从 text 里找被换行符包围的独立 6 位数
+  const lines = text.split('\n').map((l: string) => l.trim());
+  for (const line of lines) {
+    if (/^\d{6}$/.test(line)) {
+      console.info('[OPX OTP] 从 text 行提取到验证码:', line);
+      return line;
+    }
+  }
+
+  console.warn('[OPX OTP] 未能提取验证码, subject:', subject, 'send:', send);
   return '';
 }
 
