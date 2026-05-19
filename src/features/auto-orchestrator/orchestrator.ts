@@ -251,26 +251,37 @@ async function runStep(state: OrchestratorState): Promise<void> {
     }
     await setStep('wait-payment-page', '支付页已到达，正在选择 PayPal 并填写地址...');
 
-    // 主动触发：选择 PayPal + 填写地址
-    const { initPayOpenAiAddressAutofill, fillPayOpenAiAddressNow } = await import('../address-autofill/pay-openai-autofill');
-    try {
-      initPayOpenAiAddressAutofill();
-    } catch { /* already initialized */ }
-
     // 等待页面渲染
-    await delay(1500);
+    await delay(2000);
 
-    // 尝试点击 PayPal 并填写地址
+    // 直接点击 PayPal 选项
+    clickPaypalOption();
+    await delay(1000);
+
+    // 获取随机地址并填写
     const addressResponse = await browser.runtime.sendMessage({
       type: 'opx:fetch-random-address',
       countryCode: 'US',
       city: '',
     });
+
     if (addressResponse?.ok && addressResponse?.address) {
-      const result = await fillPayOpenAiAddressNow(addressResponse.address);
-      if (result.ok) {
-        await setStep('wait-payment-page', `支付页已填写 ${result.filled} 项，等待跳转 PayPal...`);
-      }
+      const address = addressResponse.address;
+      // 填写地址字段
+      fillPaymentInput('#billingName', address.fullName);
+      fillPaymentSelect('#billingCountry', address.countryCode);
+      await delay(600);
+      fillPaymentInput('#billingAddressLine1', address.line1);
+      fillPaymentInput('#billingAddressLine2', address.line2);
+      fillPaymentInput('#billingLocality', address.city);
+      fillPaymentInput('#billingAdministrativeArea', address.state);
+      fillPaymentInput('#billingPostalCode', address.postalCode);
+      fillPaymentInput('#phoneNumber', address.phone);
+      // 勾选条款
+      checkTermsBoxes();
+      await setStep('wait-payment-page', `支付页已填写地址，等待跳转 PayPal...`);
+    } else {
+      await setStep('wait-payment-page', '获取地址失败，等待手动操作...');
     }
     return;
   }
@@ -462,4 +473,91 @@ function errorMessage(error: unknown): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// --- PayPal 点击和地址填写辅助函数 ---
+
+function clickPaypalOption(): void {
+  // 尝试各种选择器点击 PayPal
+  const selectors = [
+    '[data-testid="paypal-accordion-item"]',
+    '#payment-method-accordion-item-title-paypal',
+    'button[data-testid="paypal-accordion-item-button"]',
+    'button[aria-label*="PayPal"]',
+    '[aria-label*="paypal" i]',
+  ];
+
+  for (const selector of selectors) {
+    const el = document.querySelector<HTMLElement>(selector);
+    if (el) {
+      el.click();
+      console.info('[OPX Auto] 点击了 PayPal:', selector);
+      return;
+    }
+  }
+
+  // 找包含 "PayPal" 文字的可点击元素
+  const allClickable = document.querySelectorAll<HTMLElement>('button, label, [role="button"], [role="radio"], div[class*="accordion"], div[class*="payment"]');
+  for (const el of Array.from(allClickable)) {
+    const text = (el.textContent || '').toLowerCase();
+    if (text.includes('paypal') && !text.includes('银行')) {
+      el.click();
+      console.info('[OPX Auto] 通过文本点击了 PayPal');
+      return;
+    }
+  }
+
+  // 尝试点击 radio button
+  const radios = document.querySelectorAll<HTMLInputElement>('input[type="radio"]');
+  for (const radio of Array.from(radios)) {
+    const parent = radio.closest('label, div, li');
+    if (parent && (parent.textContent || '').toLowerCase().includes('paypal')) {
+      radio.click();
+      console.info('[OPX Auto] 点击了 PayPal radio');
+      return;
+    }
+  }
+
+  console.warn('[OPX Auto] 未找到 PayPal 选项');
+}
+
+function fillPaymentInput(selector: string, value: string): void {
+  if (!value) return;
+  const input = document.querySelector<HTMLInputElement>(selector);
+  if (!input) return;
+  if (input.value === value) return;
+
+  const proto = HTMLInputElement.prototype;
+  const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+  if (desc?.set) {
+    desc.set.call(input, value);
+  } else {
+    input.value = value;
+  }
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  input.dispatchEvent(new Event('blur', { bubbles: true }));
+}
+
+function fillPaymentSelect(selector: string, value: string): void {
+  if (!value) return;
+  const select = document.querySelector<HTMLSelectElement>(selector);
+  if (!select) return;
+  const option = Array.from(select.options).find(o => o.value === value || o.text.toLowerCase().includes(value.toLowerCase()));
+  if (option && select.value !== option.value) {
+    select.value = option.value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+}
+
+function checkTermsBoxes(): void {
+  const checkboxes = document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+  for (const cb of Array.from(checkboxes)) {
+    if (!cb.checked) {
+      const text = (cb.closest('label, div')?.textContent || '').toLowerCase();
+      if (text.includes('terms') || text.includes('consent') || text.includes('条款') || text.includes('同意') || cb.id.includes('terms')) {
+        cb.click();
+      }
+    }
+  }
 }

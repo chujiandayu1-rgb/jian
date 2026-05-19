@@ -82,6 +82,9 @@ async function waitForOutlookOtp(message: OutlookOtpMessage): Promise<OutlookOtp
   const intervalMs = message.intervalMs ?? DEFAULT_INTERVAL_MS;
   const apiBase = normalizeApiBase(message.apiBase || DEFAULT_OUTLOOK_API_BASE);
 
+  // 先清空收件箱，确保下次拿到的是最新验证码
+  await clearInboxBeforePolling(message.accountLine);
+
   while (Date.now() <= deadline) {
     const result = await fetchLatestOtp(apiBase, message.accountLine, startedAt);
     if (result.ok && result.code) {
@@ -97,6 +100,33 @@ async function waitForOutlookOtp(message: OutlookOtpMessage): Promise<OutlookOtp
     ok: false,
     message: '等待 Outlook 验证码超时',
   };
+}
+
+// 清空收件箱，确保下次拿到的邮件是新的验证码
+async function clearInboxBeforePolling(accountLine: string): Promise<void> {
+  const parts = accountLine.split('----').map((s) => s.trim());
+  const email = parts[0] || '';
+  const clientId = parts[2] || '';
+  const refreshToken = parts[3] || '';
+  const hasFullToken = refreshToken.length > 50;
+
+  // 小苹果 API 清空收件箱
+  if (hasFullToken && clientId) {
+    try {
+      const params = new URLSearchParams({
+        refresh_token: refreshToken,
+        client_id: clientId,
+        email: email,
+      });
+      await fetch(`${MAIL_API_BASE}/api/process-inbox?${params.toString()}`, { method: 'GET', cache: 'no-store' });
+      console.info('[OPX] 已清空收件箱（小苹果）');
+    } catch (e) {
+      console.warn('[OPX] 清空收件箱失败:', e);
+    }
+  }
+
+  // 等一小会让清空生效
+  await delay(1000);
 }
 
 async function fetchLatestOtp(
