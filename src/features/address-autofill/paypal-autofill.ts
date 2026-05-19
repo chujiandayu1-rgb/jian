@@ -230,16 +230,16 @@ async function resolveEmail(address: AddressProfile): Promise<string> {
 }
 
 function generatePassword(email: string): string {
-  // 取邮箱 @ 前面的用户名部分 + "123" 作为密码
+  // 取邮箱 @ 前面的用户名部分 + 随机3位数字 作为密码
   // 确保包含英文和数字，满足 PayPal 8-20字符要求
   const username = email.split('@')[0] || 'password';
   const base = username.replace(/[^a-zA-Z0-9]/g, '');
+  const randomDigits = String(Math.floor(Math.random() * 900) + 100); // 100-999
   if (/\d/.test(base) && /[a-zA-Z]/.test(base) && base.length >= 8) {
     return base;
   }
-  // 如果用户名本身不含数字，追加 123
-  const password = base + '123';
-  return password.length >= 8 ? password : password + 'Aa1';
+  const password = base + randomDigits;
+  return password.length >= 8 ? password : password + 'Aa';
 }
 
 async function resolveSmsPhone(address: AddressProfile): Promise<string> {
