@@ -286,6 +286,11 @@ async function runStep(state: OrchestratorState): Promise<void> {
       fillPaymentInput('#phoneNumber', address.phone);
       // 勾选条款
       checkTermsBoxes();
+      // 等待地址自动补全下拉框出现并点击
+      await delay(500);
+      dismissAddressAutocomplete();
+      await delay(300);
+      dismissAddressAutocomplete();
       // 标记已完成，避免重复填写
       await markCompleted('wait-payment-page', '支付页已填写地址，等待跳转 PayPal...');
     } else {
@@ -603,6 +608,22 @@ function checkTermsBoxes(): void {
         cb.click();
       }
     }
+  }
+}
+
+function dismissAddressAutocomplete(): void {
+  // Stripe 地址自动补全下拉框：点击第一个选项或手动输入选项
+  const listbox = document.querySelector<HTMLElement>('[role="listbox"].AddressAutocomplete-results--showing, [role="listbox"]');
+  if (!listbox) return;
+
+  // 优先点击"手动输入地址"选项
+  const manualOption = listbox.querySelector<HTMLElement>('[data-autocomplete-manual-entry], li:last-child');
+  const firstOption = listbox.querySelector<HTMLElement>('li[role="option"], .AddressAutocomplete-result');
+
+  const target = manualOption || firstOption;
+  if (target) {
+    target.click();
+    console.info('[OPX Auto] 点击了地址自动补全下拉选项');
   }
 }
 

@@ -136,6 +136,10 @@ async function fillCheckoutFields(address: AddressProfile): Promise<number> {
   filled += fillSelectByAutocomplete('billing country', address.countryCode, [address.countryLabel, address.countryCode]);
   filled += checkVisibleTermsCheckboxes();
 
+  // 如果出现了地址自动补全下拉框，点击第一个选项
+  await delay(300);
+  dismissAddressAutocomplete();
+
   return filled;
 }
 
@@ -402,6 +406,22 @@ function cssEscape(value: string): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function dismissAddressAutocomplete(): void {
+  // Stripe 地址自动补全下拉框：点击第一个选项或手动输入选项
+  const listbox = document.querySelector<HTMLElement>('[role="listbox"].AddressAutocomplete-results--showing, [role="listbox"]');
+  if (!listbox) return;
+
+  // 优先点击"手动输入地址"选项
+  const manualOption = listbox.querySelector<HTMLElement>('[data-autocomplete-manual-entry], li:last-child');
+  const firstOption = listbox.querySelector<HTMLElement>('li[role="option"], .AddressAutocomplete-result');
+
+  const target = manualOption || firstOption;
+  if (target) {
+    target.click();
+    console.info('[OPX Pay Autofill] 点击了地址自动补全下拉选项');
+  }
 }
 
 function isRandomAddressResponse(value: unknown): value is RandomAddressResponse {
