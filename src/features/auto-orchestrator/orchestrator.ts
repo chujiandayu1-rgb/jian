@@ -155,7 +155,17 @@ async function runStep(state: OrchestratorState): Promise<void> {
   // --- 邮箱验证码页：自动接收验证码 ---
   if (isEmailVerificationPage()) {
     if (state.completedSteps.includes('wait-otp')) {
-      await setStep('fill-profile', '验证码已处理，等待资料页...');
+      // 验证码已处理，先尝试获取 session（老号验证完直接登录，不需要资料页）
+      const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
+        type: 'opx:fetch-chatgpt-session',
+      });
+      if (sessionResponse?.ok && sessionResponse.session?.accessToken) {
+        await markCompleted('fill-profile', '老号已登录，跳过资料填写');
+        await markCompleted('fetch-session', `Session 已读取：${sessionResponse.session.email}`);
+        await generateLinkAndRedirect(sessionResponse.session.accessToken);
+        return;
+      }
+      await setStep('fill-profile', '验证码已处理，等待资料页或登录跳转...');
       return;
     }
     await setStep('wait-otp', '检测到验证码页，正在等待 Outlook 验证码...');
@@ -196,57 +206,27 @@ async function runStep(state: OrchestratorState): Promise<void> {
       return;
     }
 
-    // 如果已注册过的号，不需要填资料就直接到了 chatgpt.com，自动跳过 fill-profile
+    // 已经在 chatgpt.com 说明登录成功（不管是新号还是老号）
+    // 如果之前没有标记 fill-profile（老号或者已经过了），自动标记
     if (!state.completedSteps.includes('fill-profile')) {
-      await markCompleted('fill-profile', '已注册账号，跳过资料填写');
+      await markCompleted('fill-profile', '已登录，跳过资料填写');
     }
 
+    // 拉取 session
+    await setStep('fetch-session', '正在读取 ChatGPT session...');
+    const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
+      type: 'opx:fetch-chatgpt-session',
+    });
+    if (!sessionResponse?.ok || !sessionResponse.session?.accessToken) {
+      await setStep('fetch-session', sessionResponse?.message || '等待登录完成...');
+      return;
+    }
     if (!state.completedSteps.includes('fetch-session')) {
-      await setStep('fetch-session', '正在读取 ChatGPT session...');
-      const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
-        type: 'opx:fetch-chatgpt-session',
-      });
-      if (!sessionResponse?.ok || !sessionResponse.session?.accessToken) {
-        // 可能还没登录完成，等一会再试
-        await setStep('fetch-session', sessionResponse?.message || '等待登录完成...');
-        return;
-      }
       await markCompleted('fetch-session', `Session 已读取：${sessionResponse.session.email}`);
     }
 
-    // 生成订阅链接
-    if (!state.completedSteps.includes('generate-link')) {
-      await setStep('generate-link', '正在生成 Plus 订阅链接...');
-      const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
-        type: 'opx:fetch-chatgpt-session',
-      });
-      const token = sessionResponse?.session?.accessToken || '';
-      if (!token) {
-        await setStep('error', '无法获取 accessToken', '无法获取 accessToken');
-        return;
-      }
-
-      const linkState = await loadLinkExtractorState();
-      const linkResponse: CheckoutLinkResponse = await browser.runtime.sendMessage({
-        type: 'opx:create-checkout-link',
-        raw: token,
-        options: linkState.checkoutOptions,
-      });
-
-      const link = linkResponse?.link || linkResponse?.url || '';
-      if (!linkResponse?.ok || !link) {
-        await setStep('error', linkResponse?.message || '生成链接失败', linkResponse?.message || '');
-        return;
-      }
-
-      await saveOrchestratorState({ generatedLink: link });
-      await markCompleted('generate-link', `链接已生成`);
-
-      // 立即跳转
-      await setStep('open-checkout', '正在跳转到支付页...');
-      window.location.href = link;
-      return;
-    }
+    // 生成链接并跳转
+    await generateLinkAndRedirect(sessionResponse.session.accessToken);
     return;
   }
 
