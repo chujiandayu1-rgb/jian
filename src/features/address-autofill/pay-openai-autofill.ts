@@ -4,10 +4,11 @@ import type { AddressProfile, RandomAddressResponse } from './types';
 
 const LOG_PREFIX = '[OPX Pay Autofill]';
 const PAYPAL_SELECTORS = [
+  'button[data-testid="paypal-accordion-item-button"]',
+  'button[aria-label="用 PayPal 支付"]',
+  'button[aria-label*="PayPal"]',
   '[data-testid="paypal-accordion-item"]',
   '#payment-method-accordion-item-title-paypal',
-  'button[data-testid="paypal-accordion-item-button"]',
-  'button[aria-label*="PayPal"]',
   'button[aria-label*="paypal" i]',
 ];
 

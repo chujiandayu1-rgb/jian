@@ -521,12 +521,13 @@ function delay(ms: number): Promise<void> {
 // --- PayPal 点击和地址填写辅助函数 ---
 
 function clickPaypalOption(): void {
-  // 尝试各种选择器点击 PayPal
+  // 尝试各种选择器点击 PayPal（精确匹配实际页面元素）
   const selectors = [
+    'button[data-testid="paypal-accordion-item-button"]',
+    'button[aria-label="用 PayPal 支付"]',
+    'button[aria-label*="PayPal"]',
     '[data-testid="paypal-accordion-item"]',
     '#payment-method-accordion-item-title-paypal',
-    'button[data-testid="paypal-accordion-item-button"]',
-    'button[aria-label*="PayPal"]',
     '[aria-label*="paypal" i]',
   ];
 
