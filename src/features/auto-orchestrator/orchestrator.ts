@@ -14,14 +14,6 @@ const LOG_PREFIX = '[OPX Auto]';
 const POLL_INTERVAL_MS = 2000;
 const SMS_POLL_INTERVAL_MS = 5000;
 const SMS_TIMEOUT_MS = 180_000;
-// 在验证码页停留多久没跳转就重试
-const OTP_PAGE_STUCK_MS = 20_000;
-// 同一次重试间至少间隔
-const OTP_RETRY_INTERVAL_MS = 8_000;
-
-// 这两个变量只在当前页面生命周期内有效，刷新即重置（不写入 storage）
-let otpStuckSince = 0;
-let lastOtpRetryAt = 0;
 
 let running = false;
 let pollTimer: number | null = null;
@@ -161,89 +153,20 @@ async function runStep(state: OrchestratorState): Promise<void> {
   }
 
   // --- 邮箱验证码页：自动接收验证码 ---
+  // 思路对齐 suyancc：填完验证码点继续，**做完就放手**，让浏览器自然跳走。
+  // 不再在这里做"卡住自愈"或"等 session"——那些动作放到下面的 auth.openai.com 中间页分支里。
   if (isEmailVerificationPage()) {
     if (state.completedSteps.includes('wait-otp')) {
-      // 验证码已处理，先尝试获取 session（老号验证完直接登录，不需要资料页）
-      const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
-        type: 'opx:fetch-chatgpt-session',
-      });
-      if (sessionResponse?.ok && sessionResponse.session?.accessToken) {
-        await markCompleted('fill-profile', '老号已登录，跳过资料填写');
-        await markCompleted('fetch-session', `Session 已读取：${sessionResponse.session.email}`);
-        await generateLinkAndRedirect(sessionResponse.session.accessToken);
-        return;
-      }
-
-      // session 还没拿到，且页面还停在验证码页 → 可能是「继续」按钮没真的提交
-      // 在这里做卡住检测 + 重试
-      if (otpStuckSince === 0) {
-        otpStuckSince = Date.now();
-      }
-      const stuckFor = Date.now() - otpStuckSince;
-      const sinceLastRetry = Date.now() - lastOtpRetryAt;
-
-      if (stuckFor >= OTP_PAGE_STUCK_MS && sinceLastRetry >= OTP_RETRY_INTERVAL_MS) {
-        lastOtpRetryAt = Date.now();
-        await setStep('wait-otp', `页面卡在验证码页 ${Math.round(stuckFor / 1000)}s，尝试重新提交...`);
-
-        // 检查输入框现在的值
-        const otpInput = document.querySelector<HTMLInputElement>(
-          'input[name="code"], input[name="otp"], input[autocomplete="one-time-code"], input[inputmode="numeric"]',
-        );
-
-        // 如果输入框被 React 清空了或值变了，重新拉验证码并填
-        if (!otpInput?.value || otpInput.value.length < 4) {
-          console.warn(`${LOG_PREFIX} OTP 输入框为空，重新填写`);
-          // 把 wait-otp 从 completedSteps 里移掉，让下次 tick 重新走一次完整的填码流程
-          const newCompleted = state.completedSteps.filter((s) => s !== 'wait-otp');
-          await saveOrchestratorState({ completedSteps: newCompleted });
-          otpStuckSince = 0;
-          return;
-        }
-
-        // 输入框有值，只是按钮没真的点提交 → 强制再点一次
-        const button = findVerificationContinueButton();
-        if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
-          console.info(`${LOG_PREFIX} 重新点击「继续」按钮`);
-          button.click();
-        } else {
-          // 按钮拿不到或者被禁用 → 试试在输入框上敲 Enter
-          if (otpInput) {
-            console.info(`${LOG_PREFIX} 按钮不可用，对验证码输入框模拟回车`);
-            otpInput.focus();
-            otpInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-            otpInput.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-            otpInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-
-            // 也尝试 form.submit / requestSubmit
-            const form = otpInput.closest('form');
-            if (form) {
-              const requestSubmit = (form as HTMLFormElement).requestSubmit?.bind(form);
-              try {
-                requestSubmit ? requestSubmit() : (form as HTMLFormElement).submit();
-              } catch (e) {
-                console.warn(`${LOG_PREFIX} form submit 失败`, e);
-              }
-            }
-          }
-        }
-        return;
-      }
-
-      await setStep('fill-profile', `验证码已处理，等待资料页或登录跳转... (${Math.round(stuckFor / 1000)}s)`);
+      // 已经填过验证码了，啥都不做，等浏览器自己跳到 about-you / chatgpt.com / login_callback
+      await setStep('wait-otp', '验证码已提交，等待 OpenAI 跳转...');
       return;
     }
 
-    // 还没填过验证码 → 走正常流程
-    otpStuckSince = 0;
-    lastOtpRetryAt = 0;
     await setStep('wait-otp', '检测到验证码页，正在等待 Outlook 验证码...');
     const controller = createRegisterController();
     const result = await controller.waitForOutlookOtp();
     if (result.ok) {
       await markCompleted('wait-otp', `验证码已填入：${result.code || ''}`);
-      // 重新开始计时，这样如果按钮点了不跳转，20s 后会重试
-      otpStuckSince = Date.now();
     } else {
       await setStep('error', result.message, result.message);
     }
@@ -377,72 +300,18 @@ async function runStep(state: OrchestratorState): Promise<void> {
     return;
   }
 
-  // --- auth.openai.com：可能是中间跳转或验证完成页 ---
+  // --- auth.openai.com 中间跳转页：啥都不做，等浏览器自己跳 ---
+  // 思路对齐 suyancc：填完表单后让 OpenAI 自己处理跳转链路，
+  //   email-verification → (可能的) about-you → login_callback → chatgpt.com
+  // 我们只在「能识别到的具体页面」做事（about-you 在上面已经处理）。
+  // 中间页（/login_callback、/login、/）不做任何主动操作，等下一次 tick 时
+  // location 已经变成 chatgpt.com 了，分支自然进到 chatgpt.com 处理。
   if (hostname === 'auth.openai.com') {
-    // 1. 验证码刚处理完，处理资料页或已注册账号
-    if (state.completedSteps.includes('wait-otp') && !state.completedSteps.includes('fill-profile')) {
-      // 先检查是否是资料页（about-you），如果是就填写
-      if (isAboutYouPage()) {
-        await setStep('fill-profile', '检测到资料页，正在填写...');
-        const controller = createRegisterController();
-        const result = await controller.fillProfileAndCreate();
-        if (result.ok) {
-          await markCompleted('fill-profile', '资料已填写并提交');
-        } else {
-          await setStep('error', result.message, result.message);
-        }
-        return;
-      }
-
-      // 不是资料页，尝试获取 session（已注册的号可以直接拿到）
-      const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
-        type: 'opx:fetch-chatgpt-session',
-      });
-      if (sessionResponse?.ok && sessionResponse.session?.accessToken) {
-        // 能获取到 session 说明注册已完成
-        await markCompleted('fill-profile', '已注册账号，跳过资料填写');
-        await markCompleted('fetch-session', `Session 已读取：${sessionResponse.session.email}`);
-        // 直接生成链接并跳转，不必经过 chatgpt.com
-        await generateLinkAndRedirect(sessionResponse.session.accessToken);
-        return;
-      }
-
-      // 都不行，等待页面跳转（可能还在加载中）
-      await setStep('fill-profile', '验证完成，等待页面跳转到资料页...');
-      return;
+    if (state.completedSteps.includes('wait-otp')) {
+      await setStep(state.currentStep, '在 auth 中间页，等待跳转到 chatgpt.com...');
+    } else {
+      await setStep(state.currentStep, '在 auth 中间页，等待...');
     }
-
-    // 2. 资料填完但还在 auth 页面，轮询 session 然后直接生成链接 + 跳转支付页（不经过 chatgpt.com）
-    if (state.completedSteps.includes('fill-profile') && !state.completedSteps.includes('fetch-session')) {
-      await setStep('fetch-session', '资料已提交，正在读取 session...');
-      const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
-        type: 'opx:fetch-chatgpt-session',
-      });
-      if (sessionResponse?.ok && sessionResponse.session?.accessToken) {
-        await markCompleted('fetch-session', `Session 已读取：${sessionResponse.session.email}`);
-        // 直接生成订阅链接，跳过 chatgpt.com 中转
-        await generateLinkAndRedirect(sessionResponse.session.accessToken);
-        return;
-      }
-      await setStep('fetch-session', 'Session 还未生成，继续等待...');
-      return;
-    }
-
-    // 3. session 已读取但链接还没生成（极少见，可能跳转失败）
-    if (state.completedSteps.includes('fetch-session') && !state.completedSteps.includes('generate-link')) {
-      const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
-        type: 'opx:fetch-chatgpt-session',
-      });
-      const token = sessionResponse?.session?.accessToken || '';
-      if (token) {
-        await generateLinkAndRedirect(token);
-        return;
-      }
-      await setStep('generate-link', '等待 session...');
-      return;
-    }
-
-    await setStep(state.currentStep, '在 auth.openai.com 中间页，等待跳转...');
     return;
   }
 }
@@ -710,18 +579,6 @@ function errorMessage(error: unknown): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// 在 email-verification 页找「继续」按钮
-function findVerificationContinueButton(): HTMLButtonElement | null {
-  const submit = document.querySelector<HTMLButtonElement>('button[type="submit"]');
-  if (submit) {
-    return submit;
-  }
-  return Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find((button) => {
-    const text = (button.textContent || '').trim();
-    return text === '继续' || text.toLowerCase() === 'continue';
-  }) ?? null;
 }
 
 // --- PayPal 点击和地址填写辅助函数 ---
