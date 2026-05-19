@@ -150,45 +150,42 @@ function selectPaypalIfPresent(): boolean {
     return true;
   }
 
-  // 优先点击带 data-testid="paypal-accordion-item-button" 的按钮（最可靠）
-  const paypalButton = document.querySelector<HTMLElement>('button[data-testid="paypal-accordion-item-button"]');
-  if (paypalButton && isVisible(paypalButton)) {
-    clickElement(paypalButton);
-    console.info(`${LOG_PREFIX} 已点击 PayPal 按钮 (data-testid)`);
+  // ✅ 经实测：在 Stripe 的 PayPal 选项上，直接对 label div 派发完整指针事件最可靠
+  const paypalLabel = document.querySelector<HTMLElement>('#payment-method-label-paypal');
+  if (paypalLabel && isVisible(paypalLabel)) {
+    clickElement(paypalLabel);
+    console.info(`${LOG_PREFIX} 已点击 PayPal label`);
     return true;
   }
 
-  // 备选：点击 radio 的可点击祖先（label/wrapper）
+  // 备选：点击 paypal-accordion-item-button
+  const paypalButton = document.querySelector<HTMLElement>('button[data-testid="paypal-accordion-item-button"]');
+  if (paypalButton && isVisible(paypalButton)) {
+    clickElement(paypalButton);
+    console.info(`${LOG_PREFIX} 已点击 PayPal button`);
+    return true;
+  }
+
+  // 备选：点击 radio 的可点击祖先
   if (paypalRadio) {
-    // 找到包裹 radio 的可点击容器（通常是 label 或带 PaymentMethodFormAccordionItemTitle 的 div）
-    const wrapper = paypalRadio.closest('label, .PaymentMethodFormAccordionItemTitle, .AccordionItemCover-titleContainer, [role="radio"]') as HTMLElement | null;
+    const wrapper = paypalRadio.closest('.PaymentMethodFormAccordionItemTitle, .flex-container.direction-row.align-items-center, label, [role="radio"]') as HTMLElement | null;
     if (wrapper && isVisible(wrapper)) {
       clickElement(wrapper);
-      console.info(`${LOG_PREFIX} 已点击 PayPal radio 的容器`);
+      console.info(`${LOG_PREFIX} 已点击 PayPal radio 容器`);
       return true;
     }
-    // 直接点 radio
     clickElement(paypalRadio);
     console.info(`${LOG_PREFIX} 已点击 PayPal radio`);
     return true;
   }
 
-  // 通过 PayPal 文字标签找
-  const paypalLabel = document.querySelector<HTMLElement>('#payment-method-label-paypal');
-  if (paypalLabel) {
-    const wrapper = paypalLabel.closest('.PaymentMethodFormAccordionItemTitle, label, .AccordionItemCover-titleContainer') as HTMLElement | null;
-    const target = wrapper || paypalLabel;
-    if (isVisible(target)) {
-      clickElement(target);
-      console.info(`${LOG_PREFIX} 已通过 label 点击 PayPal`);
-      return true;
-    }
-  }
-
   // 最后回退：通过文本匹配
-  const textMatch = Array.from(document.querySelectorAll<HTMLElement>('button, label, [role="button"], [role="radio"], [data-testid], div'))
+  const textMatch = Array.from(document.querySelectorAll<HTMLElement>('div, span, label'))
     .filter(isVisible)
-    .find((element) => normalizedText(element.innerText || element.textContent).includes('paypal'));
+    .find((element) => {
+      const text = normalizedText(element.textContent);
+      return text === 'paypal';
+    });
 
   if (textMatch) {
     clickElement(textMatch);
