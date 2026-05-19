@@ -195,6 +195,11 @@ async function runStep(state: OrchestratorState): Promise<void> {
       return;
     }
 
+    // 如果已注册过的号，不需要填资料就直接到了 chatgpt.com，自动跳过 fill-profile
+    if (!state.completedSteps.includes('fill-profile')) {
+      await markCompleted('fill-profile', '已注册账号，跳过资料填写');
+    }
+
     if (!state.completedSteps.includes('fetch-session')) {
       await setStep('fetch-session', '正在读取 ChatGPT session...');
       const sessionResponse: ChatGptSessionResponse = await browser.runtime.sendMessage({
