@@ -295,13 +295,31 @@ async function runStep(state: OrchestratorState): Promise<void> {
     return;
   }
 
-  // --- paypal.com：等待 PayPal 自动填写 + 短信验证 ---
+  // --- paypal.com：自动点击按钮 + 填写 + 短信验证 ---
   if (hostname === 'www.paypal.com' || hostname === 'paypal.com') {
     if (!state.completedSteps.includes('wait-payment-page')) {
       await markCompleted('wait-payment-page', '已跳转 PayPal');
     }
 
-    // PayPal 注册页面的卡号地址等由 paypal-autofill 自动处理
+    // 1. 如果在 PayPal 登录页，自动点击"创建一个帐户"按钮
+    const createAccountBtn = findPaypalCreateAccountButton();
+    if (createAccountBtn) {
+      await setStep('wait-paypal-sms', 'PayPal 登录页，正在点击"创建帐户"...');
+      clickElementFull(createAccountBtn);
+      await delay(2000);
+      return;
+    }
+
+    // 2. 如果在 PayPal 注册页，自动点击"同意并创建账户"按钮
+    const agreeBtn = findPaypalAgreeButton();
+    if (agreeBtn) {
+      await setStep('wait-paypal-sms', 'PayPal 注册页，正在点击"同意并创建账户"...');
+      clickElementFull(agreeBtn);
+      await delay(2000);
+      return;
+    }
+
+    // 3. PayPal 注册页面的卡号地址等由 paypal-autofill 自动处理
     // 这里我们处理短信验证码
     if (isPaypalSmsVerificationPage()) {
       await setStep('wait-paypal-sms', '检测到 PayPal 短信验证页，正在接码...');
@@ -569,4 +587,96 @@ function checkTermsBoxes(): void {
       }
     }
   }
+}
+
+// --- PayPal 页面按钮自动点击辅助函数 ---
+
+/** 在 PayPal 登录页找到"创建一个帐户"按钮 */
+function findPaypalCreateAccountButton(): HTMLElement | null {
+  // 精确选择器
+  const selectors = [
+    'a[href*="signup"]',
+    'a[data-testid="createAccount"]',
+    'button[data-testid="createAccount"]',
+    '#createAccount',
+    'a#createAccount',
+  ];
+
+  for (const selector of selectors) {
+    const el = document.querySelector<HTMLElement>(selector);
+    if (el && isElementVisible(el)) {
+      return el;
+    }
+  }
+
+  // 通过文本匹配
+  const keywords = ['创建一个帐户', '创建一个账户', '创建帐户', '创建账户', 'create an account', 'sign up', 'create account'];
+  const candidates = document.querySelectorAll<HTMLElement>('a, button, [role="button"], [role="link"]');
+  for (const el of Array.from(candidates)) {
+    if (!isElementVisible(el)) continue;
+    const text = (el.textContent || '').trim().toLowerCase();
+    if (keywords.some(kw => text.includes(kw.toLowerCase()))) {
+      return el;
+    }
+  }
+
+  return null;
+}
+
+/** 在 PayPal 注册页找到"同意并创建账户"按钮 */
+function findPaypalAgreeButton(): HTMLElement | null {
+  // 精确选择器
+  const selectors = [
+    'button[type="submit"]#submitButton',
+    'button#submitButton',
+    'button[data-testid="submitButton"]',
+    'button[type="submit"][name="submit"]',
+  ];
+
+  for (const selector of selectors) {
+    const el = document.querySelector<HTMLElement>(selector);
+    if (el && isElementVisible(el)) {
+      const text = (el.textContent || '').toLowerCase();
+      if (text.includes('同意') || text.includes('创建') || text.includes('agree') || text.includes('create')) {
+        return el;
+      }
+    }
+  }
+
+  // 通过文本匹配 submit 按钮
+  const keywords = ['同意并创建账户', '同意并创建帐户', 'agree and create account', '同意并创建'];
+  const buttons = document.querySelectorAll<HTMLElement>('button[type="submit"], button, [role="button"]');
+  for (const el of Array.from(buttons)) {
+    if (!isElementVisible(el)) continue;
+    const text = (el.textContent || '').trim().toLowerCase();
+    if (keywords.some(kw => text.includes(kw.toLowerCase()))) {
+      return el;
+    }
+  }
+
+  return null;
+}
+
+/** 模拟完整点击事件序列 */
+function clickElementFull(element: HTMLElement): void {
+  element.scrollIntoView({ block: 'center', inline: 'center' });
+  for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'] as const) {
+    const EventCtor = type.startsWith('pointer') ? PointerEvent : MouseEvent;
+    element.dispatchEvent(new EventCtor(type, {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      button: 0,
+      buttons: type.endsWith('down') ? 1 : 0,
+    }));
+  }
+  element.click();
+  console.info(`[OPX Auto] 点击了 PayPal 按钮: "${element.textContent?.trim().slice(0, 30)}"`);
+}
+
+/** 判断元素是否可见 */
+function isElementVisible(el: HTMLElement): boolean {
+  if (el.offsetWidth === 0 && el.offsetHeight === 0) return false;
+  const style = window.getComputedStyle(el);
+  return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
 }
