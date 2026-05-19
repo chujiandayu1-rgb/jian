@@ -31,11 +31,14 @@ export async function fillOtpAndContinue(code: string): Promise<ActionResult> {
     return fail('没有找到验证码输入框');
   }
 
-  setNativeValue(input, normalized);
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  input.dispatchEvent(new Event('change', { bubbles: true }));
+  // 使用 React 兼容的方式输入（execCommand insertText 模拟真实键盘）
+  await fillInputLikeUser(input, normalized);
+  await waitMs(200);
 
-  await waitForUiTick();
+  // 验证值是否真的填进去了
+  if (!input.value) {
+    return fail('验证码未写入输入框（React 框架兼容问题）');
+  }
 
   const button = findContinueButton();
   if (!button) {
@@ -43,7 +46,7 @@ export async function fillOtpAndContinue(code: string): Promise<ActionResult> {
   }
 
   if (button.disabled) {
-    await waitForEnabled(button, 2500);
+    await waitForEnabled(button, 3000);
   }
 
   if (button.disabled) {
@@ -52,6 +55,54 @@ export async function fillOtpAndContinue(code: string): Promise<ActionResult> {
 
   button.click();
   return ok('已填入验证码并点击继续');
+}
+
+async function fillInputLikeUser(input: HTMLInputElement, value: string): Promise<void> {
+  // 聚焦
+  input.focus();
+  input.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+  input.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+  await waitMs(100);
+
+  // 清空已有内容
+  input.select();
+  document.execCommand('selectAll');
+  document.execCommand('delete');
+  await waitMs(50);
+
+  // 方法1：使用 execCommand insertText（对 React 兼容性最好）
+  const inserted = document.execCommand('insertText', false, value);
+
+  if (!inserted || input.value !== value) {
+    // 方法2：如果 execCommand 不行，用 native value setter + InputEvent
+    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(input),
+      'value',
+    )?.set || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+
+    if (nativeInputValueSetter) {
+      nativeInputValueSetter.call(input, value);
+    } else {
+      input.value = value;
+    }
+
+    // React 16+ 需要这个特殊的 InputEvent
+    input.dispatchEvent(new InputEvent('input', {
+      bubbles: true,
+      cancelable: true,
+      inputType: 'insertText',
+      data: value,
+    }));
+  }
+
+  await waitMs(100);
+
+  // 触发 change（注意：不要立即 blur，可能会让 React 校验前清空）
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function findOtpInput(): HTMLInputElement | null {
@@ -84,15 +135,6 @@ function findContinueButton(): HTMLButtonElement | null {
     const text = (button.textContent || '').trim();
     return text === '继续' || text.toLowerCase() === 'continue';
   }) ?? null;
-}
-
-function setNativeValue(input: HTMLInputElement, value: string): void {
-  const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-  descriptor?.set?.call(input, value);
-}
-
-function waitForUiTick(): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, 60));
 }
 
 function waitForEnabled(button: HTMLButtonElement, timeoutMs: number): Promise<void> {
