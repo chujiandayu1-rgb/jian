@@ -9,7 +9,15 @@ const OTP_SELECTORS = [
 ];
 
 export function isEmailVerificationPage(): boolean {
-  return location.hostname === 'auth.openai.com' && location.pathname.startsWith('/email-verification');
+  if (location.hostname !== 'auth.openai.com' || !location.pathname.startsWith('/email-verification')) {
+    return false;
+  }
+  // 如果页面已经显示"已验证"，不再认为是验证码输入页
+  const bodyText = (document.body?.textContent || '').toLowerCase();
+  if (bodyText.includes('已验证') || bodyText.includes('verified') || bodyText.includes('email verified')) {
+    return false;
+  }
+  return true;
 }
 
 export async function fillOtpAndContinue(code: string): Promise<ActionResult> {
