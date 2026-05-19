@@ -196,6 +196,11 @@ async function fillPaypalSignupFields(address: AddressProfile, allowRetry: boole
   filled += fillSelectOrInput(PAYPAL_FIELDS.expiryMonth, expiry.month, [expiry.month]);
   filled += fillSelectOrInput(PAYPAL_FIELDS.expiryYear, expiry.year4, [expiry.year4, expiry.year2]);
 
+  // 自动点击"同意并创建帐户"按钮
+  if (filled > 0) {
+    setTimeout(() => clickCreateAccountButton(), 800);
+  }
+
   return { filled, countryChanged: false };
 }
 
@@ -270,12 +275,15 @@ function fillPasswordField(value: string): number {
     return 0;
   }
 
+  // PayPal 要求密码必须包含英文和数字，确保密码满足要求
+  const password = ensureAlphanumericPassword(value);
+
   const currentValue = input.value.trim();
-  if (equivalentValue(currentValue, value)) {
+  if (equivalentValue(currentValue, password)) {
     return 0;
   }
 
-  setNativeValue(input, value);
+  setNativeValue(input, password);
   return 1;
 }
 
@@ -285,10 +293,11 @@ function renderPasswordEmailNote(email: string): void {
     return;
   }
 
-  fillPasswordField(email);
+  const password = ensureAlphanumericPassword(email);
+  fillPasswordField(password);
 
   const noteId = 'opx-paypal-password-note';
-  const text = `当前密码和邮箱一致（${email}）`;
+  const text = `当前密码：${password}`;
   let note = document.getElementById(noteId);
   if (!note) {
     note = document.createElement('div');
@@ -1012,8 +1021,61 @@ function createOutlookEmail(address: AddressProfile): string {
   return `${base}${suffix}@outlook.com`;
 }
 
+function ensureAlphanumericPassword(value: string): string {
+  // PayPal 要求密码必须同时包含英文字母和数字
+  const hasLetter = /[a-zA-Z]/.test(value);
+  const hasDigit = /\d/.test(value);
+
+  if (hasLetter && hasDigit && value.length >= 8) {
+    return value;
+  }
+
+  // 基于邮箱生成一个满足要求的密码
+  const base = value.replace(/@.*$/, '').replace(/[^a-zA-Z0-9]/g, '');
+  let password = base || 'Paypal';
+
+  // 确保有字母
+  if (!/[a-zA-Z]/.test(password)) {
+    password = 'Pp' + password;
+  }
+  // 确保有数字
+  if (!/\d/.test(password)) {
+    password = password + '2024';
+  }
+  // 确保长度 >= 8
+  while (password.length < 8) {
+    password = password + 'x1';
+  }
+
+  // 首字母大写使密码更强
+  return password.charAt(0).toUpperCase() + password.slice(1);
+}
+
 function isPaypalSignupPage(): boolean {
   return location.hostname.endsWith('paypal.com') && location.pathname.startsWith('/checkoutweb/signup');
+}
+
+function clickCreateAccountButton(): void {
+  // 尝试点击"同意并创建帐户" / "Agree and Create Account" 按钮
+  const submitButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('button[type="submit"], button'));
+  for (const btn of submitButtons) {
+    if (!isVisible(btn) || btn.disabled) {
+      continue;
+    }
+    const text = normalizedText(btn.textContent || '');
+    if (
+      text.includes('agree and create account') ||
+      text.includes('同意并创建账户') ||
+      text.includes('同意并创建帐户') ||
+      text.includes('create account') ||
+      text.includes('创建账户') ||
+      text.includes('创建帐户')
+    ) {
+      btn.click();
+      console.info(`${LOG_PREFIX} 已点击创建帐户按钮`);
+      return;
+    }
+  }
 }
 
 function isIgnoredInput(input: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): boolean {
