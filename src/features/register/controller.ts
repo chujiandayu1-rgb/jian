@@ -60,7 +60,8 @@ export function createRegisterController(): RegisterController {
         apiBase: state.apiBase,
         since: state.otpRequestedAt || state.updatedAt || Date.now(),
         timeoutMs: 180_000,
-        intervalMs: 5_000,
+        // 1.5 秒一次拉邮件，比之前 5 秒快 3 倍以上
+        intervalMs: 1_500,
       });
 
       if (!isActionResult(response)) {

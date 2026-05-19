@@ -7,7 +7,9 @@ import type { OutlookOtpMessage, OutlookOtpResponse } from '../src/features/regi
 import type { SmsRelayFetchMessage, SmsRelayFetchResponse } from '../src/features/sms/types';
 
 const DEFAULT_TIMEOUT_MS = 180_000;
-const DEFAULT_INTERVAL_MS = 5_000;
+// 轮询间隔：1.5 秒。yxiang6 接口很轻，这个频率不会被打 ban，
+// 同时让"邮件已到 → 填入页面"的延迟控制在 ≤ 1.5 秒
+const DEFAULT_INTERVAL_MS = 1_500;
 const ASSISTANT_SCRIPT_FILE = '/content-scripts/content.js';
 const ASSISTANT_URL_PREFIXES = [
   'https://chatgpt.com/',
@@ -113,19 +115,22 @@ async function fetchOtpFromYxiang(
   email: string,
   startedAt: number,
 ): Promise<OutlookOtpResponse & { fatal?: boolean }> {
-  // 收件箱 boxType=1
-  const inboxResult = await queryYxiangBox(email, 1, startedAt);
+  // 收件箱 + 垃圾箱并行查询，谁先有验证码就用谁
+  const [inboxResult, spamResult] = await Promise.all([
+    queryYxiangBox(email, 1, startedAt),
+    queryYxiangBox(email, 2, startedAt),
+  ]);
+
   if (inboxResult.code) {
     return { ok: true, code: inboxResult.code, message: `yxiang6 收到验证码：${inboxResult.code}` };
   }
-  if (inboxResult.fatal) {
-    return { ok: false, fatal: true, message: inboxResult.message };
-  }
-
-  // 垃圾箱 boxType=2
-  const spamResult = await queryYxiangBox(email, 2, startedAt);
   if (spamResult.code) {
     return { ok: true, code: spamResult.code, message: `yxiang6(垃圾箱)收到验证码：${spamResult.code}` };
+  }
+
+  // 任一标记为 fatal 都直接返回（避免无意义轮询）
+  if (inboxResult.fatal) {
+    return { ok: false, fatal: true, message: inboxResult.message };
   }
   if (spamResult.fatal) {
     return { ok: false, fatal: true, message: spamResult.message };

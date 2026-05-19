@@ -11,7 +11,9 @@ import type { SmsRelayTarget } from '../sms/types';
 
 const STORAGE_KEY = 'opx.orchestrator.state';
 const LOG_PREFIX = '[OPX Auto]';
-const POLL_INTERVAL_MS = 2000;
+// orchestrator 检查页面状态的间隔。1 秒比之前 2 秒快一倍，
+// 让"页面跳转 → 扩展识别"的延迟控制在 ≤ 1 秒
+const POLL_INTERVAL_MS = 1000;
 const SMS_POLL_INTERVAL_MS = 5000;
 const SMS_TIMEOUT_MS = 180_000;
 
