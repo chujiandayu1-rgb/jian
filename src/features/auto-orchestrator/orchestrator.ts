@@ -291,8 +291,11 @@ async function runStep(state: OrchestratorState): Promise<void> {
       dismissAddressAutocomplete();
       await delay(300);
       dismissAddressAutocomplete();
+      // 点击"订阅"按钮提交
+      await delay(800);
+      clickSubscribeButton();
       // 标记已完成，避免重复填写
-      await markCompleted('wait-payment-page', '支付页已填写地址，等待跳转 PayPal...');
+      await markCompleted('wait-payment-page', '支付页已填写地址并点击订阅，等待跳转 PayPal...');
     } else {
       // 获取地址失败时不标记完成，允许下次重试（但不会无限循环因为只在首次执行）
       await setStep('wait-payment-page', '获取地址失败，等待重试...');
@@ -625,6 +628,43 @@ function dismissAddressAutocomplete(): void {
     target.click();
     console.info('[OPX Auto] 点击了地址自动补全下拉选项');
   }
+}
+
+function clickSubscribeButton(): void {
+  // Stripe 支付页的"订阅"提交按钮
+  const selectors = [
+    'button.SubmitButton',
+    'button[data-testid="hosted-payment-submit-button"]',
+    'button.SubmitButton-Button',
+    '.SubmitButton button',
+    'button[type="submit"]',
+  ];
+
+  for (const selector of selectors) {
+    const el = document.querySelector<HTMLButtonElement>(selector);
+    if (el && isElementVisible(el) && !el.disabled) {
+      const text = (el.textContent || '').toLowerCase();
+      // 确认是订阅/提交类按钮（排除其他 submit 按钮）
+      if (text.includes('订阅') || text.includes('subscribe') || text.includes('pay') || text.includes('支付') || el.classList.contains('SubmitButton-Button') || el.closest('.SubmitButton')) {
+        el.click();
+        console.info('[OPX Auto] 点击了订阅按钮:', selector);
+        return;
+      }
+    }
+  }
+
+  // 兜底：找包含 SubmitButton 类的按钮容器
+  const submitContainer = document.querySelector<HTMLElement>('.SubmitButton');
+  if (submitContainer) {
+    const btn = submitContainer.querySelector<HTMLButtonElement>('button') || submitContainer as HTMLElement;
+    if (btn) {
+      btn.click();
+      console.info('[OPX Auto] 通过 SubmitButton 容器点击了订阅按钮');
+      return;
+    }
+  }
+
+  console.warn('[OPX Auto] 未找到订阅按钮');
 }
 
 // --- PayPal 页面按钮自动点击辅助函数 ---
