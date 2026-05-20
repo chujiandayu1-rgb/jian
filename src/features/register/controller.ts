@@ -67,7 +67,8 @@ export function createRegisterController(): RegisterController {
       });
 
       if (!isActionResult(response)) {
-        return fail('Outlook API 没有返回有效结果');
+        console.error('[OPX] waitForOutlookOtp 返回无效:', JSON.stringify(response));
+        return fail(`Outlook API 没有返回有效结果（${typeof response === 'object' ? JSON.stringify(response).slice(0, 100) : String(response)}）`);
       }
 
       if (!response.ok || !response.code) {
