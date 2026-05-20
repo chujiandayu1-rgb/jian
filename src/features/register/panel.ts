@@ -24,16 +24,55 @@ export function createRegisterPanel(container: HTMLElement, controller: Register
   const autoOtpButton = createButton('自动接收并填入验证码', 'opx-button opx-button-secondary');
   const profileButton = createButton('填写资料并创建');
 
+  const apiBaseLabel = document.createElement('div');
+  apiBaseLabel.className = 'opx-label';
+  apiBaseLabel.textContent = '收码 API 地址（别人使用需修改）';
+
+  const apiBaseInput = document.createElement('input');
+  apiBaseInput.className = 'opx-input';
+  apiBaseInput.type = 'text';
+  apiBaseInput.placeholder = 'http://127.0.0.1:8787';
+  apiBaseInput.autocomplete = 'off';
+  apiBaseInput.spellcheck = false;
+
+  const apiBaseHint = document.createElement('div');
+  apiBaseHint.className = 'opx-hint';
+  apiBaseHint.textContent = '⚠ 默认为本机地址，其他人使用需要改为公网收码服务地址';
+
   const status = document.createElement('div');
   status.className = 'opx-status';
   status.textContent = '等待操作';
 
+  // Track which fields are currently being edited so the periodic update()
+  // doesn't clobber the user's keystrokes.
+  const editing = new WeakSet<HTMLElement>();
+  const trackEditing = (el: HTMLInputElement | HTMLTextAreaElement) => {
+    el.addEventListener('focus', () => editing.add(el));
+    el.addEventListener('blur', () => editing.delete(el));
+    el.addEventListener('compositionstart', () => editing.add(el));
+    el.addEventListener('compositionend', () => editing.delete(el));
+  };
+  trackEditing(accountInput);
+  trackEditing(otp);
+  trackEditing(apiBaseInput);
+
   const update = async () => {
     const page = controller.getPageState();
     const saved = await controller.loadState();
-    if (accountInput.value !== saved.rawInput) {
-      accountInput.value = saved.rawInput;
+
+    // Only sync external state into the textarea if the user is not
+    // currently editing it. Otherwise typing gets overwritten every tick.
+    if (!editing.has(accountInput) && document.activeElement !== accountInput) {
+      if (accountInput.value !== saved.rawInput) {
+        accountInput.value = saved.rawInput;
+      }
     }
+    if (!editing.has(apiBaseInput) && document.activeElement !== apiBaseInput) {
+      if (apiBaseInput.value !== saved.apiBase) {
+        apiBaseInput.value = saved.apiBase;
+      }
+    }
+
     emailButton.disabled = !page.canFillEmail;
     otpButton.disabled = !page.canFillOtp;
     autoOtpButton.disabled = !page.canFillOtp || !saved.autoOtp;
@@ -43,11 +82,19 @@ export function createRegisterPanel(container: HTMLElement, controller: Register
       : '单邮箱模式：验证码需要手动输入';
   };
 
-  accountInput.addEventListener('input', async () => {
-    const saved = await controller.saveInput(accountInput.value);
-    inputHint.textContent = saved.autoOtp
-      ? 'Outlook 行模式：验证码页会通过本地 API 自动收码'
-      : '单邮箱模式：验证码需要手动输入';
+  accountInput.addEventListener('input', () => {
+    // Save in the background. Don't await here — awaiting inside an `input`
+    // listener can interleave with the next keystroke and the periodic
+    // refresh, which previously made the field feel un-editable.
+    void controller.saveInput(accountInput.value).then((saved) => {
+      inputHint.textContent = saved.autoOtp
+        ? 'Outlook 行模式：验证码页会通过本地 API 自动收码'
+        : '单邮箱模式：验证码需要手动输入';
+    });
+  });
+
+  apiBaseInput.addEventListener('input', () => {
+    void controller.saveApiBase(apiBaseInput.value);
   });
 
   emailButton.addEventListener('click', async () => {
@@ -75,7 +122,19 @@ export function createRegisterPanel(container: HTMLElement, controller: Register
     await update();
   });
 
-  container.append(accountInput, inputHint, emailButton, otp, otpButton, autoOtpButton, profileButton, status);
+  container.append(
+    accountInput,
+    inputHint,
+    emailButton,
+    otp,
+    otpButton,
+    autoOtpButton,
+    profileButton,
+    apiBaseLabel,
+    apiBaseInput,
+    apiBaseHint,
+    status,
+  );
   void update();
   return { update };
 }
