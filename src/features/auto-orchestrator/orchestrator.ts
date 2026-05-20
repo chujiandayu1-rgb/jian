@@ -213,6 +213,19 @@ async function runStep(state: OrchestratorState): Promise<void> {
 
   // --- 资料填写页：自动填写姓名年龄 ---
   if (isAboutYouPage()) {
+    // 如果之前标记过 fill-profile 但页面上 input 还是空的，说明误标了，必须重新填
+    if (state.completedSteps.includes('fill-profile') && !aboutYouFormLooksFilled()) {
+      console.warn(`${LOG_PREFIX} fill-profile was marked completed but inputs are empty, refilling`);
+      await setStep('fill-profile', '资料页未真正填写，重新填...');
+      const controller = createRegisterController();
+      const result = await controller.fillProfileAndCreate();
+      if (result.ok) {
+        await setStep('fill-profile', '资料已重新填写并提交');
+      } else {
+        await setStep('fill-profile', `资料页填写未就绪：${result.message}（自动重试中）`);
+      }
+      return;
+    }
     if (state.completedSteps.includes('fill-profile')) {
       await setStep('fetch-session', '资料已填，等待跳转到 chatgpt.com...');
       return;
@@ -223,7 +236,8 @@ async function runStep(state: OrchestratorState): Promise<void> {
     if (result.ok) {
       await markCompleted('fill-profile', '资料已填写并提交');
     } else {
-      await setStep('error', result.message, result.message);
+      // 资料页 input 可能还没渲染，不要立刻 error，下个 tick 再试
+      await setStep('fill-profile', `资料页填写未就绪：${result.message}（自动重试中）`);
     }
     return;
   }
@@ -238,10 +252,21 @@ async function runStep(state: OrchestratorState): Promise<void> {
       return;
     }
 
-    // 已经在 chatgpt.com 说明登录成功（不管是新号还是老号）
-    // 如果之前没有标记 fill-profile（老号或者已经过了），自动标记
+    // 已经在 chatgpt.com 说明登录成功
+    // 如果之前没标记 fill-profile，说明这是 (a) 老号直接登录，或者 (b) 资料页其实已经被
+    // 用户/上游手动填过了。两种情况都没法再回去填了，所以这里跳过资料填写。
+    // 注意：只有当 wait-otp 也已完成，才认为是"完整的注册流程"，否则可能是用户从未启动过
+    // orchestrator 直接被恢复了。
     if (!state.completedSteps.includes('fill-profile')) {
-      await markCompleted('fill-profile', '已登录，跳过资料填写');
+      if (state.completedSteps.includes('wait-otp')) {
+        await markCompleted('fill-profile', '已登录到 chatgpt.com，跳过资料填写');
+      } else {
+        // 既没填邮箱也没验证就直接到了 chatgpt.com，多半是老号 cookie 还在
+        // 标记前面所有步骤为已完成，避免后面一直卡住
+        await markCompleted('fill-email', '老号 cookie 已登录');
+        await markCompleted('wait-otp', '老号 cookie 已登录');
+        await markCompleted('fill-profile', '老号 cookie 已登录');
+      }
     }
 
     // 拉取 session
@@ -350,7 +375,8 @@ async function runStep(state: OrchestratorState): Promise<void> {
         if (result.ok) {
           await markCompleted('fill-profile', '资料已填写并提交');
         } else {
-          await setStep('error', result.message, result.message);
+          // 资料页可能还在渲染，不要立刻 error
+          await setStep('fill-profile', `资料页填写未就绪：${result.message}（自动重试中）`);
         }
         return;
       }
@@ -759,4 +785,30 @@ function checkTermsBoxes(): void {
       }
     }
   }
+}
+
+// 检查 about-you 页面上的可见 text/number input 里是否真的有值
+// 用来判断"fill-profile 标记完成了，但其实页面还停留在空白资料页"这种异常情况
+function aboutYouFormLooksFilled(): boolean {
+  const inputs = Array.from(document.querySelectorAll<HTMLInputElement>('input')).filter((input) => {
+    const type = (input.type || 'text').toLowerCase();
+    if (!['text', 'number', 'tel', ''].includes(type)) {
+      return false;
+    }
+    // 只看用户能看到的可视 input
+    const style = window.getComputedStyle(input);
+    if (style.display === 'none' || style.visibility === 'hidden') {
+      return false;
+    }
+    const rect = input.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  });
+
+  if (inputs.length === 0) {
+    // input 还没渲染出来，按"还没填"看待，让上面的逻辑去重试填写
+    return false;
+  }
+
+  // 至少要有一个 input 里有非空值，否则就当作没填
+  return inputs.some((input) => (input.value || '').trim().length > 0);
 }
