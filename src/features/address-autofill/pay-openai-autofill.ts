@@ -22,10 +22,24 @@ export function initPayOpenAiAddressAutofill(): void {
     return;
   }
 
-  initialized = true;
-  installStorageListener();
-  installObserver();
-  scheduleAutofill(800);
+  // 如果 orchestrator 正在运行,不要自动触发旧的填写逻辑——让新的 hosted-openai-fill 接管
+  browser.storage.local.get('opx.orchestrator.state').then((data) => {
+    const state = data?.['opx.orchestrator.state'];
+    if (state && typeof state === 'object' && (state as Record<string, unknown>).enabled) {
+      console.info(`${LOG_PREFIX} orchestrator is active, skipping auto-fill (new hosted-openai-fill will handle it)`);
+      return;
+    }
+    initialized = true;
+    installStorageListener();
+    installObserver();
+    scheduleAutofill(800);
+  }).catch(() => {
+    // fallback: 还是启动旧逻辑
+    initialized = true;
+    installStorageListener();
+    installObserver();
+    scheduleAutofill(800);
+  });
 }
 
 async function runAutofill(): Promise<void> {
