@@ -21,6 +21,9 @@ export function createRegisterController(): RegisterController {
         autoOtp: parsed.mode === 'outlook-line',
       });
     },
+    saveApiBase: async (apiBase: string) => {
+      return saveRegisterState({ apiBase: apiBase.trim() });
+    },
     fillEmailFromInput: async () => {
       const state = await loadRegisterState();
       const parsed = parseAccountInput(state.rawInput);
