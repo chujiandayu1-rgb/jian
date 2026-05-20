@@ -16,6 +16,8 @@ const ASSISTANT_URL_PREFIXES = [
   'https://pay.openai.com/',
   'https://www.paypal.com/',
   'https://paypal.com/',
+  'http://127.0.0.1:1455/',
+  'http://localhost:1455/',
 ];
 
 export default defineBackground(() => {

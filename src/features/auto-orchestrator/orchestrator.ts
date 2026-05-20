@@ -21,6 +21,7 @@ let listeners: Array<(state: OrchestratorState) => void> = [];
 
 const DEFAULT_STATE: OrchestratorState = {
   enabled: false,
+  paused: false,
   currentStep: 'idle',
   statusMessage: '等待开始',
   startedAt: 0,
@@ -55,6 +56,7 @@ export async function startOrchestrator(): Promise<void> {
   if (!registerState.rawInput.trim()) {
     await saveOrchestratorState({
       enabled: false,
+      paused: false,
       currentStep: 'error',
       lastError: '请先在注册 tab 输入 Outlook 账号行',
       statusMessage: '请先输入账号',
@@ -64,6 +66,7 @@ export async function startOrchestrator(): Promise<void> {
 
   await saveOrchestratorState({
     enabled: true,
+    paused: false,
     currentStep: 'idle',
     statusMessage: '自动化已启动，正在检测页面...',
     startedAt: Date.now(),
@@ -79,9 +82,35 @@ export async function stopOrchestrator(): Promise<void> {
   cancelPolling();
   await saveOrchestratorState({
     enabled: false,
+    paused: true,
     currentStep: 'idle',
     statusMessage: '已停止',
   });
+}
+
+export async function resetOrchestrator(): Promise<void> {
+  cancelPolling();
+  // 完整清空状态，避免下次"开始"时读回 completedSteps 跳过应该跑的步骤
+  const data = await browser.storage.local.get(STORAGE_KEY);
+  void data;
+  await browser.storage.local.set({
+    [STORAGE_KEY]: {
+      ...DEFAULT_STATE,
+      paused: true, // 保持 paused，防止 paypal/pay.openai 自动填写仍在工作
+      statusMessage: '已重置',
+      updatedAt: Date.now(),
+    } satisfies OrchestratorState,
+  });
+  notifyListeners({
+    ...DEFAULT_STATE,
+    paused: true,
+    statusMessage: '已重置',
+    updatedAt: Date.now(),
+  });
+}
+
+export async function isOrchestratorPaused(): Promise<boolean> {
+  return (await loadOrchestratorState()).paused;
 }
 
 export function beginPolling(): void {
@@ -94,6 +123,9 @@ export function beginPolling(): void {
 
 export async function resumeIfEnabled(): Promise<void> {
   const state = await loadOrchestratorState();
+  if (state.paused) {
+    return;
+  }
   if (state.enabled && state.currentStep !== 'done' && state.currentStep !== 'error') {
     beginPolling();
   }
@@ -113,7 +145,7 @@ async function tick(): Promise<void> {
   running = true;
   try {
     const state = await loadOrchestratorState();
-    if (!state.enabled) {
+    if (!state.enabled || state.paused) {
       cancelPolling();
       return;
     }
@@ -181,6 +213,19 @@ async function runStep(state: OrchestratorState): Promise<void> {
 
   // --- 资料填写页：自动填写姓名年龄 ---
   if (isAboutYouPage()) {
+    // 如果之前标记过 fill-profile 但页面上 input 还是空的，说明误标了，必须重新填
+    if (state.completedSteps.includes('fill-profile') && !aboutYouFormLooksFilled()) {
+      console.warn(`${LOG_PREFIX} fill-profile was marked completed but inputs are empty, refilling`);
+      await setStep('fill-profile', '资料页未真正填写，重新填...');
+      const controller = createRegisterController();
+      const result = await controller.fillProfileAndCreate();
+      if (result.ok) {
+        await setStep('fill-profile', '资料已重新填写并提交');
+      } else {
+        await setStep('fill-profile', `资料页填写未就绪：${result.message}（自动重试中）`);
+      }
+      return;
+    }
     if (state.completedSteps.includes('fill-profile')) {
       await setStep('fetch-session', '资料已填，等待跳转到 chatgpt.com...');
       return;
@@ -191,7 +236,8 @@ async function runStep(state: OrchestratorState): Promise<void> {
     if (result.ok) {
       await markCompleted('fill-profile', '资料已填写并提交');
     } else {
-      await setStep('error', result.message, result.message);
+      // 资料页 input 可能还没渲染，不要立刻 error，下个 tick 再试
+      await setStep('fill-profile', `资料页填写未就绪：${result.message}（自动重试中）`);
     }
     return;
   }
@@ -206,10 +252,21 @@ async function runStep(state: OrchestratorState): Promise<void> {
       return;
     }
 
-    // 已经在 chatgpt.com 说明登录成功（不管是新号还是老号）
-    // 如果之前没有标记 fill-profile（老号或者已经过了），自动标记
+    // 已经在 chatgpt.com 说明登录成功
+    // 如果之前没标记 fill-profile，说明这是 (a) 老号直接登录，或者 (b) 资料页其实已经被
+    // 用户/上游手动填过了。两种情况都没法再回去填了，所以这里跳过资料填写。
+    // 注意：只有当 wait-otp 也已完成，才认为是"完整的注册流程"，否则可能是用户从未启动过
+    // orchestrator 直接被恢复了。
     if (!state.completedSteps.includes('fill-profile')) {
-      await markCompleted('fill-profile', '已登录，跳过资料填写');
+      if (state.completedSteps.includes('wait-otp')) {
+        await markCompleted('fill-profile', '已登录到 chatgpt.com，跳过资料填写');
+      } else {
+        // 既没填邮箱也没验证就直接到了 chatgpt.com，多半是老号 cookie 还在
+        // 标记前面所有步骤为已完成，避免后面一直卡住
+        await markCompleted('fill-email', '老号 cookie 已登录');
+        await markCompleted('wait-otp', '老号 cookie 已登录');
+        await markCompleted('fill-profile', '老号 cookie 已登录');
+      }
     }
 
     // 拉取 session
@@ -236,14 +293,16 @@ async function runStep(state: OrchestratorState): Promise<void> {
       await markCompleted('open-checkout', '已到达支付页');
     }
 
-    if (state.completedSteps.includes('wait-payment-page')) {
+    // 即使之前标记了 wait-payment-page 完成，如果页面上还是没选 PayPal 或地址还是空的，
+    // 重新跑一次（页面可能慢加载，或上次填了之后被 Stripe 重新挂载清掉了）
+    if (state.completedSteps.includes('wait-payment-page') && payOpenAiPageLooksFilled()) {
       await setStep('wait-payment-page', '支付页已填写，等待跳转 PayPal...');
       return;
     }
 
     await setStep('wait-payment-page', '支付页已到达，正在选择 PayPal 并填写地址...');
 
-    // 等待页面渲染
+    // 等待页面渲染（Stripe 的 PayPal 选项往往要 3-5 秒才挂载出来）
     await delay(3000);
 
     // 获取随机地址
@@ -256,8 +315,11 @@ async function runStep(state: OrchestratorState): Promise<void> {
     if (addressResponse?.ok && addressResponse?.address) {
       // 使用 pay-openai-autofill 中完善的填充逻辑（包括点击 PayPal + 填写所有字段）
       const fillResult = await fillPayOpenAiAddressNow(addressResponse.address);
-      if (fillResult.ok) {
+      if (fillResult.ok && payOpenAiPageLooksFilled()) {
         await markCompleted('wait-payment-page', `支付页已填写 ${fillResult.filled} 项，等待跳转 PayPal...`);
+      } else if (fillResult.ok) {
+        // 字段填了但 PayPal 还没选中（比如 PayPal 选项还没渲染），下个 tick 再重试
+        await setStep('wait-payment-page', `已填 ${fillResult.filled} 项，但 PayPal 选项尚未点中，自动重试中...`);
       } else {
         // 回退到简单方式
         clickPaypalOption();
@@ -273,7 +335,11 @@ async function runStep(state: OrchestratorState): Promise<void> {
         fillPaymentInput('#billingPostalCode', address.postalCode);
         fillPaymentInput('#phoneNumber', address.phone);
         checkTermsBoxes();
-        await markCompleted('wait-payment-page', '支付页已填写地址（回退方式），等待跳转 PayPal...');
+        if (payOpenAiPageLooksFilled()) {
+          await markCompleted('wait-payment-page', '支付页已填写地址（回退方式），等待跳转 PayPal...');
+        } else {
+          await setStep('wait-payment-page', '回退填写未完成，自动重试中...');
+        }
       }
     } else {
       await setStep('wait-payment-page', '获取地址失败，等待手动操作...');
@@ -318,7 +384,8 @@ async function runStep(state: OrchestratorState): Promise<void> {
         if (result.ok) {
           await markCompleted('fill-profile', '资料已填写并提交');
         } else {
-          await setStep('error', result.message, result.message);
+          // 资料页可能还在渲染，不要立刻 error
+          await setStep('fill-profile', `资料页填写未就绪：${result.message}（自动重试中）`);
         }
         return;
       }
@@ -613,6 +680,7 @@ function normalizeState(value: unknown): OrchestratorState {
   const source = value as Record<string, unknown>;
   return {
     enabled: Boolean(source.enabled),
+    paused: Boolean(source.paused),
     currentStep: isValidStep(source.currentStep) ? source.currentStep : 'idle',
     statusMessage: String(source.statusMessage || DEFAULT_STATE.statusMessage),
     startedAt: Number(source.startedAt || 0),
@@ -726,4 +794,82 @@ function checkTermsBoxes(): void {
       }
     }
   }
+}
+
+// 检查 about-you 页面上的可见 text/number input 里是否真的有值
+// 用来判断"fill-profile 标记完成了，但其实页面还停留在空白资料页"这种异常情况
+function aboutYouFormLooksFilled(): boolean {
+  const inputs = Array.from(document.querySelectorAll<HTMLInputElement>('input')).filter((input) => {
+    const type = (input.type || 'text').toLowerCase();
+    if (!['text', 'number', 'tel', ''].includes(type)) {
+      return false;
+    }
+    // 只看用户能看到的可视 input
+    const style = window.getComputedStyle(input);
+    if (style.display === 'none' || style.visibility === 'hidden') {
+      return false;
+    }
+    const rect = input.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  });
+
+  if (inputs.length === 0) {
+    // input 还没渲染出来，按"还没填"看待，让上面的逻辑去重试填写
+    return false;
+  }
+
+  // 至少要有一个 input 里有非空值，否则就当作没填
+  return inputs.some((input) => (input.value || '').trim().length > 0);
+}
+
+
+
+// 检查 pay.openai.com 上 PayPal 是否被选中、地址 input 是否有值
+// 用来判断 wait-payment-page 是否真的完成了，避免 orchestrator 卡死在"已填写"假状态
+function payOpenAiPageLooksFilled(): boolean {
+  // 1. PayPal 是否被选中
+  let paypalSelected = false;
+
+  // 1a. 检查老版 Stripe accordion radio
+  const oldRadio = document.querySelector<HTMLInputElement>(
+    '#payment-method-accordion-item-title-paypal',
+  );
+  if (oldRadio?.checked || oldRadio?.getAttribute('aria-checked') === 'true') {
+    paypalSelected = true;
+  }
+
+  // 1b. 检查任何被选中的 PayPal radio
+  if (!paypalSelected) {
+    const radios = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="radio"]:checked'));
+    paypalSelected = radios.some((radio) => {
+      const haystack = `${radio.id} ${radio.value} ${radio.name} ${radio.getAttribute('aria-label') || ''}`.toLowerCase();
+      return haystack.includes('paypal');
+    });
+  }
+
+  // 1c. 检查新版 Stripe Payment Element 的 aria-selected tab
+  if (!paypalSelected) {
+    const selectedTab = document.querySelector<HTMLElement>(
+      '[role="tab"][aria-selected="true"], [role="radio"][aria-checked="true"]',
+    );
+    if (selectedTab) {
+      paypalSelected = (selectedTab.textContent || '').toLowerCase().includes('paypal');
+    }
+  }
+
+  // 2. 地址至少有一个关键字段填了（姓名 / 街道 / 邮编）
+  const addressInputs = [
+    'input#billingName',
+    'input#billingAddressLine1',
+    'input#billingPostalCode',
+    'input[autocomplete="billing address-line1"]',
+    'input[name="billingName"]',
+  ];
+  const addressLooksFilled = addressInputs.some((selector) => {
+    const input = document.querySelector<HTMLInputElement>(selector);
+    return input && (input.value || '').trim().length > 0;
+  });
+
+  // 必须 PayPal 选中 + 地址有值，才认为真填好了
+  return paypalSelected && addressLooksFilled;
 }

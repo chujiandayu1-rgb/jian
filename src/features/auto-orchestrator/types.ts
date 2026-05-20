@@ -13,6 +13,11 @@ export type OrchestratorStep =
 
 export interface OrchestratorState {
   enabled: boolean;
+  /**
+   * 用户主动点了"停止"或"重置"。一旦为 true，所有自动填写模块（pay.openai 地址自动填写、
+   * PayPal 注册页自动填写）都会跳过工作，直到用户重新点"一键开始"。
+   */
+  paused: boolean;
   currentStep: OrchestratorStep;
   statusMessage: string;
   startedAt: number;

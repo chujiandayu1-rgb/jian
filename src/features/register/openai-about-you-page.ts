@@ -40,8 +40,18 @@ export function isAboutYouPage(): boolean {
 }
 
 export async function fillAboutYouAndCreate(): Promise<ActionResult> {
-  const nameInput = findNameInput();
-  const ageInput = findAgeInput(nameInput);
+  // 资料页是 SPA 异步渲染的，input 可能要 1-3 秒才出现，先等一下
+  let nameInput = findNameInput();
+  let ageInput = findAgeInput(nameInput);
+
+  if (!nameInput || !ageInput) {
+    const deadline = Date.now() + 6000;
+    while (Date.now() < deadline && (!nameInput || !ageInput)) {
+      await waitMs(250);
+      nameInput = findNameInput();
+      ageInput = findAgeInput(nameInput);
+    }
+  }
 
   if (!nameInput) {
     return fail('没有找到全名输入框');

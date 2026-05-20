@@ -17,7 +17,7 @@ export const PANEL_STYLES = `
 
 .opx-panel {
   box-sizing: border-box;
-  width: min(320px, calc(100vw - 42px));
+  width: min(360px, calc(100vw - 42px));
   max-height: calc(100vh - 88px);
   margin-right: 18px;
   padding: 10px;
@@ -85,19 +85,32 @@ export const PANEL_STYLES = `
 }
 
 .opx-tabs {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: nowrap;
   gap: 4px;
   margin-bottom: 0;
   padding: 3px;
   border: 1px solid rgba(148, 163, 184, 0.16);
   border-radius: 8px;
   background: rgba(15, 23, 42, 0.8);
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(47, 209, 124, 0.55) transparent;
+}
+
+.opx-tabs::-webkit-scrollbar {
+  height: 4px;
+}
+
+.opx-tabs::-webkit-scrollbar-thumb {
+  background: rgba(47, 209, 124, 0.55);
+  border-radius: 999px;
 }
 
 .opx-tab {
+  flex: 1 1 0;
+  min-width: 48px;
   height: 30px;
-  min-width: 0;
   border: 0;
   border-radius: 6px;
   background: transparent;

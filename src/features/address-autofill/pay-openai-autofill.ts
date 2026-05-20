@@ -1,3 +1,4 @@
+import { isOrchestratorPaused } from '../auto-orchestrator/orchestrator';
 import { loadAddressAutofillSettings, saveAddressAutofillSettings } from '../settings/state';
 import type { AddressAutofillSettings } from '../settings/types';
 import type { AddressProfile, RandomAddressResponse } from './types';
@@ -35,6 +36,10 @@ async function runAutofill(): Promise<void> {
 
   running = true;
   try {
+    if (await isOrchestratorPaused()) {
+      console.info(`${LOG_PREFIX} paused by orchestrator`);
+      return;
+    }
     const settings = await loadAddressAutofillSettings();
     if (!settings.payOpenAiEnabled) {
       console.info(`${LOG_PREFIX} disabled`);
@@ -144,57 +149,113 @@ async function fillCheckoutFields(address: AddressProfile): Promise<number> {
 }
 
 function selectPaypalIfPresent(): boolean {
-  // 检查 PayPal radio 是否已选中
-  const paypalRadio = document.querySelector<HTMLInputElement>('#payment-method-accordion-item-title-paypal');
-  if (paypalRadio?.checked || paypalRadio?.getAttribute('aria-checked') === 'true') {
-    return true;
-  }
-
-  // ✅ 经实测：在 Stripe 的 PayPal 选项上，直接对 label div 派发完整指针事件最可靠
-  const paypalLabel = document.querySelector<HTMLElement>('#payment-method-label-paypal');
-  if (paypalLabel && isVisible(paypalLabel)) {
-    clickElement(paypalLabel);
-    console.info(`${LOG_PREFIX} 已点击 PayPal label`);
-    return true;
-  }
-
-  // 备选：点击 paypal-accordion-item-button
-  const paypalButton = document.querySelector<HTMLElement>('button[data-testid="paypal-accordion-item-button"]');
-  if (paypalButton && isVisible(paypalButton)) {
-    clickElement(paypalButton);
-    console.info(`${LOG_PREFIX} 已点击 PayPal button`);
-    return true;
-  }
-
-  // 备选：点击 radio 的可点击祖先
-  if (paypalRadio) {
-    const wrapper = paypalRadio.closest('.PaymentMethodFormAccordionItemTitle, .flex-container.direction-row.align-items-center, label, [role="radio"]') as HTMLElement | null;
-    if (wrapper && isVisible(wrapper)) {
-      clickElement(wrapper);
-      console.info(`${LOG_PREFIX} 已点击 PayPal radio 容器`);
+  // ---- 1. 先看是否已经选中（多种 DOM 形式）----
+  const checkedRadio = document.querySelector<HTMLInputElement>(
+    'input[type="radio"][name*="payment" i]:checked, input[type="radio"][value*="paypal" i]:checked, input[type="radio"][id*="paypal" i]:checked',
+  );
+  if (checkedRadio) {
+    const haystack = normalizedText(`${checkedRadio.value} ${checkedRadio.id} ${checkedRadio.getAttribute('aria-label') || ''}`);
+    if (haystack.includes('paypal')) {
       return true;
     }
-    clickElement(paypalRadio);
-    console.info(`${LOG_PREFIX} 已点击 PayPal radio`);
+  }
+  const ariaChecked = document.querySelector<HTMLElement>(
+    '[role="radio"][aria-checked="true"], [role="tab"][aria-selected="true"]',
+  );
+  if (ariaChecked) {
+    const text = normalizedText(ariaChecked.textContent);
+    if (text.includes('paypal')) {
+      return true;
+    }
+  }
+
+  // ---- 2. 一系列已知/可能的 PayPal 选项 selector ----
+  const directSelectors = [
+    // 老版 Stripe accordion
+    '#payment-method-label-paypal',
+    '#payment-method-accordion-item-title-paypal',
+    'button[data-testid="paypal-accordion-item-button"]',
+    '[data-testid="paypal-accordion-item"]',
+    // 新版 Stripe Payment Element 的 tab
+    '[data-testid="paypal-tab"]',
+    'button[id*="paypal" i][role="tab"]',
+    'button[aria-label*="PayPal" i]',
+    'button[aria-label*="paypal" i]',
+    // OpenAI checkout 自己的 radio 容器
+    'label[for*="paypal" i]',
+    'input[type="radio"][id*="paypal" i]',
+    'input[type="radio"][value*="paypal" i]',
+  ];
+  for (const selector of directSelectors) {
+    const element = document.querySelector<HTMLElement>(selector);
+    if (element && isVisible(element)) {
+      const target = clickableAncestor(element);
+      clickElement(target);
+      console.info(`${LOG_PREFIX} 已点击 PayPal (${selector})`);
+      return true;
+    }
+  }
+
+  // ---- 3. 文本匹配：找一个可见的、文本含 PayPal 的可点击元素 ----
+  // 注意要避开 SVG 图标元素，专门找 button / label / role=radio / role=tab
+  const candidates = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      'button, label, [role="radio"], [role="tab"], [role="button"], div[class*="payment" i], div[class*="method" i]',
+    ),
+  ).filter((element) => {
+    if (!isVisible(element)) {
+      return false;
+    }
+    const text = normalizedText(element.textContent || '');
+    if (!text.includes('paypal')) {
+      return false;
+    }
+    // 文字总长度超过 50 字符，可能是包含 PayPal 字样的更外层容器（比如条款），跳过
+    return text.length <= 50;
+  });
+
+  if (candidates.length > 0) {
+    // 选最小的那个（最具体）
+    const target = candidates.sort((a, b) => {
+      const aArea = a.getBoundingClientRect().width * a.getBoundingClientRect().height;
+      const bArea = b.getBoundingClientRect().width * b.getBoundingClientRect().height;
+      return aArea - bArea;
+    })[0];
+    clickElement(clickableAncestor(target));
+    console.info(`${LOG_PREFIX} 通过文本匹配点击了 PayPal`, target);
     return true;
   }
 
-  // 最后回退：通过文本匹配
-  const textMatch = Array.from(document.querySelectorAll<HTMLElement>('div, span, label'))
+  // ---- 4. 找包含 PayPal logo 的 img / svg，再点它最近的可点击祖先 ----
+  const logoMatch = Array.from(document.querySelectorAll<HTMLElement>('img, svg'))
     .filter(isVisible)
     .find((element) => {
-      const text = normalizedText(element.textContent);
-      return text === 'paypal';
+      const text = normalizedText([
+        element.getAttribute('alt'),
+        element.getAttribute('aria-label'),
+        element.getAttribute('title'),
+      ].join(' '));
+      return text.includes('paypal');
     });
-
-  if (textMatch) {
-    clickElement(textMatch);
-    console.info(`${LOG_PREFIX} 通过文本匹配点击了 PayPal`);
-    return true;
+  if (logoMatch) {
+    const target = clickableAncestor(logoMatch);
+    if (target) {
+      clickElement(target);
+      console.info(`${LOG_PREFIX} 通过 logo 匹配点击了 PayPal`);
+      return true;
+    }
   }
 
   console.warn(`${LOG_PREFIX} 未找到 PayPal 选项`);
   return false;
+}
+
+// 找一个能响应点击的祖先（label / button / role=radio / role=tab / role=button）
+function clickableAncestor(element: HTMLElement): HTMLElement {
+  const node = element.closest(
+    'button, label, [role="radio"], [role="tab"], [role="button"], a',
+  ) as HTMLElement | null;
+  return node && isVisible(node) ? node : element;
 }
 
 function fillInput(selector: string, value: string, overwrite: boolean): number {
