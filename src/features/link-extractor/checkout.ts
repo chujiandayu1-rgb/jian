@@ -354,6 +354,10 @@ function extractResponseError(data: unknown, text: string): string {
 }
 
 function explainStripeCurrencyError(message: string): string {
+  if (/user\s+is\s+already\s+paid/i.test(message)) {
+    return '此账号没有试用资格';
+  }
+
   if (!/cannot combine currencies on a single customer/i.test(message)) {
     return message;
   }

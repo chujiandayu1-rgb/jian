@@ -180,7 +180,7 @@ async function fillPaypalSignupFields(address: AddressProfile, allowRetry: boole
   filled += fillText(PAYPAL_FIELDS.email, email, true);
   filled += fillPasswordField(email);
   renderPasswordEmailNote(email);
-  filled += fillText(PAYPAL_FIELDS.phone, address.phone, true);
+  filled += fillText(PAYPAL_FIELDS.phone, normalizePaypalPhone(address.phone, address.countryCode), true);
   filled += fillText(PAYPAL_FIELDS.cardNumber, address.creditCard.number, true);
   filled += fillText(PAYPAL_FIELDS.expiry, expiry.short, true);
   filled += fillText(PAYPAL_FIELDS.csc, address.creditCard.cvv, true);
@@ -1019,6 +1019,61 @@ function createOutlookEmail(address: AddressProfile): string {
     .slice(0, 18) || 'outlookuser';
   const suffix = (address.id + address.fetchedAt).replace(/\D/g, '').slice(-6) || String(Date.now()).slice(-6);
   return `${base}${suffix}@outlook.com`;
+}
+
+// PayPal 注册页的电话字段会跟随国家自动加上区号。
+// 如果地址里的 phone 是 `+18352890015` 或 `+1 8352890015` 这样的国际格式，
+// 直接填进去会被 PayPal 拼成 `+1+18352890015`，所以这里去掉前导 + 号和与所选国家匹配的国家区号。
+const PAYPAL_COUNTRY_DIAL_CODES: Record<string, string[]> = {
+  US: ['1'],
+  CA: ['1'],
+  AU: ['61'],
+  CN: ['86'],
+  JP: ['81'],
+  KR: ['82'],
+  TW: ['886'],
+  HK: ['852'],
+  SG: ['65'],
+  GB: ['44'],
+  DE: ['49'],
+  FR: ['33'],
+  IT: ['39'],
+  ES: ['34'],
+  NL: ['31'],
+  MY: ['60'],
+  RU: ['7'],
+  TH: ['66'],
+  PH: ['63'],
+  AR: ['54'],
+  TR: ['90'],
+  VN: ['84'],
+};
+
+function normalizePaypalPhone(rawPhone: string, countryCode: string): string {
+  const trimmed = String(rawPhone || '').trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  // 留下数字和 +，便于识别国家区号。
+  const compact = trimmed.replace(/[^\d+]/g, '');
+  if (!compact) {
+    return '';
+  }
+
+  if (compact.startsWith('+')) {
+    const digits = compact.slice(1);
+    const country = String(countryCode || '').trim().toUpperCase();
+    const dialCodes = PAYPAL_COUNTRY_DIAL_CODES[country] || [];
+    for (const code of dialCodes) {
+      if (digits.startsWith(code)) {
+        return digits.slice(code.length);
+      }
+    }
+    return digits;
+  }
+
+  return compact;
 }
 
 function ensureAlphanumericPassword(value: string): string {

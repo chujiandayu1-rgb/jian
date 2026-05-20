@@ -1,6 +1,7 @@
 import { createAddressPanel } from '../features/address-autofill/panel';
 import { createAutoPanel } from '../features/auto-orchestrator/panel';
 import { createLinkExtractorPanel } from '../features/link-extractor/panel';
+import { createOAuthPanel } from '../features/oauth/panel';
 import { createRegisterPanel } from '../features/register/panel';
 import type { RegisterController } from '../features/register/types';
 import { createSettingsDialog } from '../features/settings/panel';
@@ -37,10 +38,11 @@ export function createPanel(root: ShadowRoot, registerController: RegisterContro
 
   const registerTab = createTab('register', '注册');
   const linkTab = createTab('link', '提链接');
+  const oauthTab = createTab('oauth', 'OAuth');
   const addressTab = createTab('address', '地址');
   const smsTab = createTab('sms', '接码');
   const autoTab = createTab('auto', '一键');
-  tabs.append(autoTab, registerTab, linkTab, addressTab, smsTab);
+  tabs.append(autoTab, registerTab, linkTab, oauthTab, addressTab, smsTab);
 
   const settingsButton = document.createElement('button');
   settingsButton.className = 'opx-icon-button';
@@ -54,6 +56,7 @@ export function createPanel(root: ShadowRoot, registerController: RegisterContro
 
   const registerView = createView();
   const linkView = createView();
+  const oauthView = createView();
   const addressView = createView();
   const smsView = createView();
   const autoView = createView();
@@ -62,6 +65,7 @@ export function createPanel(root: ShadowRoot, registerController: RegisterContro
     auto: createAutoPanel(autoView),
     register: createRegisterPanel(registerView, registerController),
     link: createLinkExtractorPanel(linkView),
+    oauth: createOAuthPanel(oauthView),
     address: createAddressPanel(addressView),
     sms: createSmsPanel(smsView),
   };
@@ -91,12 +95,13 @@ export function createPanel(root: ShadowRoot, registerController: RegisterContro
   };
 
   const renderActiveTab = () => {
-    for (const item of [autoTab, registerTab, linkTab, addressTab, smsTab]) {
+    for (const item of [autoTab, registerTab, linkTab, oauthTab, addressTab, smsTab]) {
       item.classList.toggle('is-active', item.dataset.tab === activeTab);
     }
     autoView.hidden = activeTab !== 'auto';
     registerView.hidden = activeTab !== 'register';
     linkView.hidden = activeTab !== 'link';
+    oauthView.hidden = activeTab !== 'oauth';
     addressView.hidden = activeTab !== 'address';
     smsView.hidden = activeTab !== 'sms';
   };
@@ -112,6 +117,7 @@ export function createPanel(root: ShadowRoot, registerController: RegisterContro
 
   registerTab.addEventListener('click', () => void setActiveTab('register'));
   linkTab.addEventListener('click', () => void setActiveTab('link'));
+  oauthTab.addEventListener('click', () => void setActiveTab('oauth'));
   addressTab.addEventListener('click', () => void setActiveTab('address'));
   smsTab.addEventListener('click', () => void setActiveTab('sms'));
   autoTab.addEventListener('click', () => void setActiveTab('auto'));
@@ -124,7 +130,7 @@ export function createPanel(root: ShadowRoot, registerController: RegisterContro
   });
 
   topbar.append(tabs, settingsButton);
-  panel.append(topbar, versionNotice.element, state, autoView, registerView, linkView, addressView, smsView, settingsDialog.element);
+  panel.append(topbar, versionNotice.element, state, autoView, registerView, linkView, oauthView, addressView, smsView, settingsDialog.element);
   shell.append(collapseButton, panel);
   root.append(style, shell);
 
@@ -144,6 +150,9 @@ function getStateLabel(activeTab: FeatureTab, registerController: RegisterContro
   }
   if (activeTab === 'link') {
     return '提链接：ChatGPT session';
+  }
+  if (activeTab === 'oauth') {
+    return 'OAuth：授权码导出';
   }
   if (activeTab === 'address') {
     return '地址：随机资料';

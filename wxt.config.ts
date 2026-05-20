@@ -7,6 +7,8 @@ export default defineConfig({
     host_permissions: [
       'http://127.0.0.1:8787/*',
       'http://localhost:8787/*',
+      'http://127.0.0.1:1455/*',
+      'http://localhost:1455/*',
       'https://auth.openai.com/*',
       'https://chatgpt.com/*',
       'https://pay.openai.com/*',
