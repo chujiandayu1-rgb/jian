@@ -78,8 +78,6 @@ function isAssistantUrl(url: string | undefined): boolean {
 
 async function waitForOutlookOtp(message: OutlookOtpMessage): Promise<OutlookOtpResponse> {
   const startedAt = message.since ?? Date.now();
-  const deadline = Date.now() + (message.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  const intervalMs = message.intervalMs ?? DEFAULT_INTERVAL_MS;
   const apiBase = normalizeApiBase(message.apiBase || DEFAULT_OUTLOOK_API_BASE);
 
   // 解析邮箱
@@ -91,34 +89,17 @@ async function waitForOutlookOtp(message: OutlookOtpMessage): Promise<OutlookOtp
     !apiBase.includes('127.0.0.1') &&
     !apiBase.includes('localhost');
 
-  // 先清空收件箱，确保下次拿到的是最新验证码
-  if (!isCustomApiUrl) {
-    await clearInboxBeforePolling(message.accountLine);
+  // 单次请求，不做长轮询（避免 MV3 service worker 30 秒超时）
+  let result: OutlookOtpResponse & { fatal?: boolean };
+
+  if (isCustomApiUrl) {
+    result = await fetchOtpFromCustomApi(apiBase, email);
+  } else {
+    result = await fetchLatestOtp(apiBase, message.accountLine, startedAt);
   }
 
-  while (Date.now() <= deadline) {
-    let result: OutlookOtpResponse & { fatal?: boolean };
-
-    if (isCustomApiUrl) {
-      // 用户填了自定义 API 地址，直接用该地址请求
-      result = await fetchOtpFromCustomApi(apiBase, email);
-    } else {
-      result = await fetchLatestOtp(apiBase, message.accountLine, startedAt);
-    }
-
-    if (result.ok && result.code) {
-      return result;
-    }
-    if (!result.ok && result.fatal) {
-      return result;
-    }
-    await delay(intervalMs);
-  }
-
-  return {
-    ok: false,
-    message: '等待 Outlook 验证码超时',
-  };
+  console.info('[OPX] waitForOutlookOtp 结果:', JSON.stringify(result));
+  return result;
 }
 
 /**

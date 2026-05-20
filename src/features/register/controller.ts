@@ -57,30 +57,42 @@ export function createRegisterController(): RegisterController {
         return fail('当前输入不是 Outlook 账号行，不能自动接收验证码');
       }
 
-      const response = await browser.runtime.sendMessage({
-        type: 'opx:wait-outlook-otp',
-        accountLine: state.accountLine,
-        apiBase: state.apiBase,
-        since: state.otpRequestedAt || state.updatedAt || Date.now(),
-        timeoutMs: 180_000,
-        intervalMs: 5_000,
-      });
+      const deadline = Date.now() + 180_000;
+      const intervalMs = 5_000;
 
-      if (!isActionResult(response)) {
-        console.error('[OPX] waitForOutlookOtp 返回无效:', JSON.stringify(response));
-        return fail(`Outlook API 没有返回有效结果（${typeof response === 'object' ? JSON.stringify(response).slice(0, 100) : String(response)}）`);
+      // 轮询在 content script 里做（避免 MV3 service worker 30 秒超时）
+      while (Date.now() <= deadline) {
+        const response = await browser.runtime.sendMessage({
+          type: 'opx:wait-outlook-otp',
+          accountLine: state.accountLine,
+          apiBase: state.apiBase,
+          since: state.otpRequestedAt || state.updatedAt || Date.now(),
+        });
+
+        if (!isActionResult(response)) {
+          console.error('[OPX] waitForOutlookOtp 返回无效:', JSON.stringify(response));
+          return fail(`Outlook API 没有返回有效结果（${typeof response === 'object' ? JSON.stringify(response).slice(0, 100) : String(response)}）`);
+        }
+
+        if (response.ok && response.code) {
+          const fillResult = await fillOtpAndContinue(response.code);
+          return {
+            ...fillResult,
+            code: response.code,
+            message: fillResult.ok ? `已收到并提交验证码：${response.code}` : fillResult.message,
+          };
+        }
+
+        // 如果是 fatal 错误直接返回
+        if (!response.ok && (response as any).fatal) {
+          return response;
+        }
+
+        // 等待后重试
+        await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
       }
 
-      if (!response.ok || !response.code) {
-        return response;
-      }
-
-      const fillResult = await fillOtpAndContinue(response.code);
-      return {
-        ...fillResult,
-        code: response.code,
-        message: fillResult.ok ? `已收到并提交验证码：${response.code}` : fillResult.message,
-      };
+      return fail('等待 Outlook 验证码超时');
     },
     fillProfileAndCreate: async () => {
       if (!isAboutYouPage()) {
