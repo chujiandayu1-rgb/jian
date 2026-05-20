@@ -210,14 +210,19 @@ async function fetchOtpFromYxiangApi(
     console.info('[OPX 自定义yxiang6] 请求收件箱:', inboxUrl);
 
     const response = await fetch(inboxUrl, { method: 'GET', cache: 'no-store' });
+    console.info('[OPX 自定义yxiang6] 收件箱响应状态:', response.status);
     if (!response.ok) {
       return { ok: false, fatal: false, message: `yxiang6 API 返回 ${response.status}` };
     }
 
     const data = await response.json() as { code?: number; data?: any[]; message?: string };
+    console.info('[OPX 自定义yxiang6] 收件箱数据:', 'code=', data.code, 'dataLen=', data.data?.length, 'msg=', data.message);
+
     if (data.code === 200 && Array.isArray(data.data)) {
       for (const mail of data.data) {
+        console.info('[OPX 自定义yxiang6] 邮件:', 'From=', mail?.From, 'Subject=', mail?.Subject);
         const code = extractOtpFromYxiangMail(mail);
+        console.info('[OPX 自定义yxiang6] 提取结果:', code || '(空)');
         if (code) {
           return { ok: true, code, message: `收到验证码：${code}` };
         }
@@ -226,9 +231,11 @@ async function fetchOtpFromYxiangApi(
 
     // 垃圾箱
     const spamUrl = `${origin}/api/GetLastEmails?email=${encodeURIComponent(email)}&boxType=2&num=2`;
+    console.info('[OPX 自定义yxiang6] 请求垃圾箱:', spamUrl);
     const spamResponse = await fetch(spamUrl, { method: 'GET', cache: 'no-store' });
     if (spamResponse.ok) {
       const spamData = await spamResponse.json() as { code?: number; data?: any[] };
+      console.info('[OPX 自定义yxiang6] 垃圾箱数据:', 'code=', spamData.code, 'dataLen=', spamData.data?.length);
       if (spamData.code === 200 && Array.isArray(spamData.data)) {
         for (const mail of spamData.data) {
           const code = extractOtpFromYxiangMail(mail);
@@ -241,6 +248,7 @@ async function fetchOtpFromYxiangApi(
 
     return { ok: false, message: data.message || '暂未收到验证码' };
   } catch (error) {
+    console.error('[OPX 自定义yxiang6] 异常:', String(error));
     return { ok: false, fatal: false, message: `yxiang6 API 错误：${String(error)}` };
   }
 }
