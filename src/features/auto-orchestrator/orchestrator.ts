@@ -293,14 +293,16 @@ async function runStep(state: OrchestratorState): Promise<void> {
       await markCompleted('open-checkout', '已到达支付页');
     }
 
-    if (state.completedSteps.includes('wait-payment-page')) {
+    // 即使之前标记了 wait-payment-page 完成，如果页面上还是没选 PayPal 或地址还是空的，
+    // 重新跑一次（页面可能慢加载，或上次填了之后被 Stripe 重新挂载清掉了）
+    if (state.completedSteps.includes('wait-payment-page') && payOpenAiPageLooksFilled()) {
       await setStep('wait-payment-page', '支付页已填写，等待跳转 PayPal...');
       return;
     }
 
     await setStep('wait-payment-page', '支付页已到达，正在选择 PayPal 并填写地址...');
 
-    // 等待页面渲染
+    // 等待页面渲染（Stripe 的 PayPal 选项往往要 3-5 秒才挂载出来）
     await delay(3000);
 
     // 获取随机地址
@@ -313,8 +315,11 @@ async function runStep(state: OrchestratorState): Promise<void> {
     if (addressResponse?.ok && addressResponse?.address) {
       // 使用 pay-openai-autofill 中完善的填充逻辑（包括点击 PayPal + 填写所有字段）
       const fillResult = await fillPayOpenAiAddressNow(addressResponse.address);
-      if (fillResult.ok) {
+      if (fillResult.ok && payOpenAiPageLooksFilled()) {
         await markCompleted('wait-payment-page', `支付页已填写 ${fillResult.filled} 项，等待跳转 PayPal...`);
+      } else if (fillResult.ok) {
+        // 字段填了但 PayPal 还没选中（比如 PayPal 选项还没渲染），下个 tick 再重试
+        await setStep('wait-payment-page', `已填 ${fillResult.filled} 项，但 PayPal 选项尚未点中，自动重试中...`);
       } else {
         // 回退到简单方式
         clickPaypalOption();
@@ -330,7 +335,11 @@ async function runStep(state: OrchestratorState): Promise<void> {
         fillPaymentInput('#billingPostalCode', address.postalCode);
         fillPaymentInput('#phoneNumber', address.phone);
         checkTermsBoxes();
-        await markCompleted('wait-payment-page', '支付页已填写地址（回退方式），等待跳转 PayPal...');
+        if (payOpenAiPageLooksFilled()) {
+          await markCompleted('wait-payment-page', '支付页已填写地址（回退方式），等待跳转 PayPal...');
+        } else {
+          await setStep('wait-payment-page', '回退填写未完成，自动重试中...');
+        }
       }
     } else {
       await setStep('wait-payment-page', '获取地址失败，等待手动操作...');
@@ -811,4 +820,56 @@ function aboutYouFormLooksFilled(): boolean {
 
   // 至少要有一个 input 里有非空值，否则就当作没填
   return inputs.some((input) => (input.value || '').trim().length > 0);
+}
+
+
+
+// 检查 pay.openai.com 上 PayPal 是否被选中、地址 input 是否有值
+// 用来判断 wait-payment-page 是否真的完成了，避免 orchestrator 卡死在"已填写"假状态
+function payOpenAiPageLooksFilled(): boolean {
+  // 1. PayPal 是否被选中
+  let paypalSelected = false;
+
+  // 1a. 检查老版 Stripe accordion radio
+  const oldRadio = document.querySelector<HTMLInputElement>(
+    '#payment-method-accordion-item-title-paypal',
+  );
+  if (oldRadio?.checked || oldRadio?.getAttribute('aria-checked') === 'true') {
+    paypalSelected = true;
+  }
+
+  // 1b. 检查任何被选中的 PayPal radio
+  if (!paypalSelected) {
+    const radios = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="radio"]:checked'));
+    paypalSelected = radios.some((radio) => {
+      const haystack = `${radio.id} ${radio.value} ${radio.name} ${radio.getAttribute('aria-label') || ''}`.toLowerCase();
+      return haystack.includes('paypal');
+    });
+  }
+
+  // 1c. 检查新版 Stripe Payment Element 的 aria-selected tab
+  if (!paypalSelected) {
+    const selectedTab = document.querySelector<HTMLElement>(
+      '[role="tab"][aria-selected="true"], [role="radio"][aria-checked="true"]',
+    );
+    if (selectedTab) {
+      paypalSelected = (selectedTab.textContent || '').toLowerCase().includes('paypal');
+    }
+  }
+
+  // 2. 地址至少有一个关键字段填了（姓名 / 街道 / 邮编）
+  const addressInputs = [
+    'input#billingName',
+    'input#billingAddressLine1',
+    'input#billingPostalCode',
+    'input[autocomplete="billing address-line1"]',
+    'input[name="billingName"]',
+  ];
+  const addressLooksFilled = addressInputs.some((selector) => {
+    const input = document.querySelector<HTMLInputElement>(selector);
+    return input && (input.value || '').trim().length > 0;
+  });
+
+  // 必须 PayPal 选中 + 地址有值，才认为真填好了
+  return paypalSelected && addressLooksFilled;
 }
