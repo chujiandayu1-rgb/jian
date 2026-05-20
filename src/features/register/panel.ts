@@ -45,29 +45,36 @@ export function createRegisterPanel(container: HTMLElement, controller: Register
 
   // Track which fields are currently being edited so the periodic update()
   // doesn't clobber the user's keystrokes.
-  const editing = new WeakSet<HTMLElement>();
+  // We use a simple Set + focus/blur/input events. We do NOT rely on
+  // document.activeElement because the panel lives inside a ShadowRoot
+  // and document.activeElement won't point to shadow DOM elements.
+  const focused = new Set<HTMLElement>();
+  const dirty = new Set<HTMLElement>();
   const trackEditing = (el: HTMLInputElement | HTMLTextAreaElement) => {
-    el.addEventListener('focus', () => editing.add(el));
-    el.addEventListener('blur', () => editing.delete(el));
-    el.addEventListener('compositionstart', () => editing.add(el));
-    el.addEventListener('compositionend', () => editing.delete(el));
+    el.addEventListener('focus', () => focused.add(el));
+    el.addEventListener('blur', () => { focused.delete(el); dirty.delete(el); });
+    el.addEventListener('input', () => dirty.add(el));
+    el.addEventListener('compositionstart', () => focused.add(el));
+    el.addEventListener('compositionend', () => focused.add(el));
   };
   trackEditing(accountInput);
   trackEditing(otp);
   trackEditing(apiBaseInput);
 
+  const isEditing = (el: HTMLElement) => focused.has(el) || dirty.has(el);
+
   const update = async () => {
     const page = controller.getPageState();
     const saved = await controller.loadState();
 
-    // Only sync external state into the textarea if the user is not
-    // currently editing it. Otherwise typing gets overwritten every tick.
-    if (!editing.has(accountInput) && document.activeElement !== accountInput) {
+    // Only sync external state into the input if the user is NOT
+    // currently focused on it or has unsaved changes (dirty).
+    if (!isEditing(accountInput)) {
       if (accountInput.value !== saved.rawInput) {
         accountInput.value = saved.rawInput;
       }
     }
-    if (!editing.has(apiBaseInput) && document.activeElement !== apiBaseInput) {
+    if (!isEditing(apiBaseInput)) {
       if (apiBaseInput.value !== saved.apiBase) {
         apiBaseInput.value = saved.apiBase;
       }
@@ -87,6 +94,9 @@ export function createRegisterPanel(container: HTMLElement, controller: Register
     // listener can interleave with the next keystroke and the periodic
     // refresh, which previously made the field feel un-editable.
     void controller.saveInput(accountInput.value).then((saved) => {
+      // After successfully saving, clear the dirty flag so next update()
+      // can safely sync from storage (the value is now consistent).
+      dirty.delete(accountInput);
       inputHint.textContent = saved.autoOtp
         ? 'Outlook 行模式：验证码页会通过本地 API 自动收码'
         : '单邮箱模式：验证码需要手动输入';
@@ -94,7 +104,9 @@ export function createRegisterPanel(container: HTMLElement, controller: Register
   });
 
   apiBaseInput.addEventListener('input', () => {
-    void controller.saveApiBase(apiBaseInput.value);
+    void controller.saveApiBase(apiBaseInput.value).then(() => {
+      dirty.delete(apiBaseInput);
+    });
   });
 
   emailButton.addEventListener('click', async () => {
