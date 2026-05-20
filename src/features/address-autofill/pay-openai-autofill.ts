@@ -1,3 +1,4 @@
+import { isOrchestratorPaused } from '../auto-orchestrator/orchestrator';
 import { loadAddressAutofillSettings, saveAddressAutofillSettings } from '../settings/state';
 import type { AddressAutofillSettings } from '../settings/types';
 import type { AddressProfile, RandomAddressResponse } from './types';
@@ -35,6 +36,10 @@ async function runAutofill(): Promise<void> {
 
   running = true;
   try {
+    if (await isOrchestratorPaused()) {
+      console.info(`${LOG_PREFIX} paused by orchestrator`);
+      return;
+    }
     const settings = await loadAddressAutofillSettings();
     if (!settings.payOpenAiEnabled) {
       console.info(`${LOG_PREFIX} disabled`);

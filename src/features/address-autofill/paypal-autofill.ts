@@ -1,4 +1,5 @@
 import { loadRegisterState } from '../../app/state';
+import { isOrchestratorPaused } from '../auto-orchestrator/orchestrator';
 import { parseAccountInput } from '../register/account-input';
 import { loadAddressAutofillSettings, saveAddressAutofillSettings } from '../settings/state';
 import type { AddressAutofillSettings } from '../settings/types';
@@ -116,6 +117,10 @@ async function runAutofill(): Promise<void> {
 
   running = true;
   try {
+    if (await isOrchestratorPaused()) {
+      console.info(`${LOG_PREFIX} paused by orchestrator`);
+      return;
+    }
     const settings = await loadAddressAutofillSettings();
     if (!settings.payPalSignupEnabled) {
       console.info(`${LOG_PREFIX} disabled`);

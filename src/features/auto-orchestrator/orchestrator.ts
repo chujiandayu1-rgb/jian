@@ -21,6 +21,7 @@ let listeners: Array<(state: OrchestratorState) => void> = [];
 
 const DEFAULT_STATE: OrchestratorState = {
   enabled: false,
+  paused: false,
   currentStep: 'idle',
   statusMessage: '等待开始',
   startedAt: 0,
@@ -55,6 +56,7 @@ export async function startOrchestrator(): Promise<void> {
   if (!registerState.rawInput.trim()) {
     await saveOrchestratorState({
       enabled: false,
+      paused: false,
       currentStep: 'error',
       lastError: '请先在注册 tab 输入 Outlook 账号行',
       statusMessage: '请先输入账号',
@@ -64,6 +66,7 @@ export async function startOrchestrator(): Promise<void> {
 
   await saveOrchestratorState({
     enabled: true,
+    paused: false,
     currentStep: 'idle',
     statusMessage: '自动化已启动，正在检测页面...',
     startedAt: Date.now(),
@@ -79,9 +82,35 @@ export async function stopOrchestrator(): Promise<void> {
   cancelPolling();
   await saveOrchestratorState({
     enabled: false,
+    paused: true,
     currentStep: 'idle',
     statusMessage: '已停止',
   });
+}
+
+export async function resetOrchestrator(): Promise<void> {
+  cancelPolling();
+  // 完整清空状态，避免下次"开始"时读回 completedSteps 跳过应该跑的步骤
+  const data = await browser.storage.local.get(STORAGE_KEY);
+  void data;
+  await browser.storage.local.set({
+    [STORAGE_KEY]: {
+      ...DEFAULT_STATE,
+      paused: true, // 保持 paused，防止 paypal/pay.openai 自动填写仍在工作
+      statusMessage: '已重置',
+      updatedAt: Date.now(),
+    } satisfies OrchestratorState,
+  });
+  notifyListeners({
+    ...DEFAULT_STATE,
+    paused: true,
+    statusMessage: '已重置',
+    updatedAt: Date.now(),
+  });
+}
+
+export async function isOrchestratorPaused(): Promise<boolean> {
+  return (await loadOrchestratorState()).paused;
 }
 
 export function beginPolling(): void {
@@ -94,6 +123,9 @@ export function beginPolling(): void {
 
 export async function resumeIfEnabled(): Promise<void> {
   const state = await loadOrchestratorState();
+  if (state.paused) {
+    return;
+  }
   if (state.enabled && state.currentStep !== 'done' && state.currentStep !== 'error') {
     beginPolling();
   }
@@ -113,7 +145,7 @@ async function tick(): Promise<void> {
   running = true;
   try {
     const state = await loadOrchestratorState();
-    if (!state.enabled) {
+    if (!state.enabled || state.paused) {
       cancelPolling();
       return;
     }
@@ -613,6 +645,7 @@ function normalizeState(value: unknown): OrchestratorState {
   const source = value as Record<string, unknown>;
   return {
     enabled: Boolean(source.enabled),
+    paused: Boolean(source.paused),
     currentStep: isValidStep(source.currentStep) ? source.currentStep : 'idle',
     statusMessage: String(source.statusMessage || DEFAULT_STATE.statusMessage),
     startedAt: Number(source.startedAt || 0),

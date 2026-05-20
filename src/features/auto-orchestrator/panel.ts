@@ -2,6 +2,7 @@ import type { FeaturePanelHandle } from '../../app/types';
 import {
   loadOrchestratorState,
   onOrchestratorStateChange,
+  resetOrchestrator,
   startOrchestrator,
   stopOrchestrator,
 } from './orchestrator';
@@ -99,10 +100,9 @@ export function createAutoPanel(container: HTMLElement): FeaturePanelHandle {
   });
 
   resetButton.addEventListener('click', async () => {
-    await stopOrchestrator();
+    await resetOrchestrator();
     startButton.disabled = false;
     stopButton.disabled = true;
-    renderState({ ...DEFAULT_RENDER_STATE });
   });
 
   // --- 监听状态变化 ---
@@ -158,6 +158,7 @@ export function createAutoPanel(container: HTMLElement): FeaturePanelHandle {
 
 const DEFAULT_RENDER_STATE: OrchestratorState = {
   enabled: false,
+  paused: false,
   currentStep: 'idle',
   statusMessage: '等待开始',
   startedAt: 0,
