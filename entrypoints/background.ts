@@ -82,11 +82,30 @@ async function waitForOutlookOtp(message: OutlookOtpMessage): Promise<OutlookOtp
   const intervalMs = message.intervalMs ?? DEFAULT_INTERVAL_MS;
   const apiBase = normalizeApiBase(message.apiBase || DEFAULT_OUTLOOK_API_BASE);
 
+  // 解析邮箱
+  const parts = message.accountLine.split('----').map((s) => s.trim());
+  const email = parts[0] || '';
+
+  // 判断用户是否填了自定义 API 地址（比如 http://www.yxiang6.com/boobar?email=）
+  const isCustomApiUrl = apiBase !== normalizeApiBase(DEFAULT_OUTLOOK_API_BASE) &&
+    !apiBase.includes('127.0.0.1') &&
+    !apiBase.includes('localhost');
+
   // 先清空收件箱，确保下次拿到的是最新验证码
-  await clearInboxBeforePolling(message.accountLine);
+  if (!isCustomApiUrl) {
+    await clearInboxBeforePolling(message.accountLine);
+  }
 
   while (Date.now() <= deadline) {
-    const result = await fetchLatestOtp(apiBase, message.accountLine, startedAt);
+    let result: OutlookOtpResponse & { fatal?: boolean };
+
+    if (isCustomApiUrl) {
+      // 用户填了自定义 API 地址，直接用该地址请求
+      result = await fetchOtpFromCustomApi(apiBase, email);
+    } else {
+      result = await fetchLatestOtp(apiBase, message.accountLine, startedAt);
+    }
+
     if (result.ok && result.code) {
       return result;
     }
@@ -100,6 +119,117 @@ async function waitForOutlookOtp(message: OutlookOtpMessage): Promise<OutlookOtp
     ok: false,
     message: '等待 Outlook 验证码超时',
   };
+}
+
+/**
+ * 用户自定义 API 获取验证码
+ * 支持格式：
+ *  - http://www.yxiang6.com/boobar?email=  → 拼接邮箱到末尾
+ *  - http://example.com/api?email=xxx&key=yyy → 已包含 email 参数则替换
+ *  - http://example.com/api/xxx@outlook.com → 邮箱在路径里
+ */
+async function fetchOtpFromCustomApi(
+  apiBase: string,
+  email: string,
+): Promise<OutlookOtpResponse & { fatal?: boolean }> {
+  if (!email) {
+    return { ok: false, fatal: true, message: '没有邮箱地址' };
+  }
+
+  let url: string;
+  // 如果 URL 以 ?email= 或 &email= 结尾，直接拼邮箱
+  if (apiBase.endsWith('?email=') || apiBase.endsWith('&email=')) {
+    url = apiBase + encodeURIComponent(email);
+  } else if (apiBase.includes('?email=') || apiBase.includes('&email=')) {
+    // URL 里已经有 email 参数值，替换它
+    url = apiBase.replace(/([?&]email=)[^&]*/i, `$1${encodeURIComponent(email)}`);
+  } else if (apiBase.includes('?')) {
+    // 有其他参数但没有 email，追加 email 参数
+    url = `${apiBase}&email=${encodeURIComponent(email)}`;
+  } else {
+    // 没有任何参数，加上 ?email=
+    url = `${apiBase}?email=${encodeURIComponent(email)}`;
+  }
+
+  console.info('[OPX] 自定义 API 请求:', url);
+
+  let response: Response;
+  try {
+    response = await fetch(url, { method: 'GET', cache: 'no-store' });
+  } catch (error) {
+    return { ok: false, fatal: true, message: `自定义 API 连接失败：${String(error)}` };
+  }
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    return { ok: false, fatal: false, message: `自定义 API 返回 ${response.status}：${text.slice(0, 200)}` };
+  }
+
+  // 尝试解析返回内容中的验证码
+  const text = await response.text();
+  let code = '';
+
+  // 1. 尝试 JSON 解析
+  try {
+    const json = JSON.parse(text) as Record<string, unknown>;
+    code = extractCodeFromJson(json);
+  } catch {
+    // 不是 JSON，从纯文本提取
+    code = extractCodeFromText(text);
+  }
+
+  if (code) {
+    return { ok: true, code, message: `自定义 API 收到验证码：${code}` };
+  }
+
+  return { ok: false, message: `自定义 API 暂未返回验证码（响应: ${text.slice(0, 100)}）` };
+}
+
+/** 从 JSON 响应里提取验证码 */
+function extractCodeFromJson(json: Record<string, unknown>): string {
+  // 常见字段名
+  const codeFields = ['code', 'otp', 'verificationCode', 'verification_code', 'data', 'sms_code', 'captcha'];
+  for (const field of codeFields) {
+    const val = json[field];
+    if (typeof val === 'string' && /^\d{4,8}$/.test(val.trim())) {
+      return val.trim();
+    }
+    if (typeof val === 'number' && val >= 1000 && val <= 99999999) {
+      return String(val);
+    }
+  }
+
+  // 递归查找嵌套对象
+  if (typeof json.data === 'object' && json.data !== null) {
+    const nested = extractCodeFromJson(json.data as Record<string, unknown>);
+    if (nested) return nested;
+  }
+  if (typeof json.result === 'object' && json.result !== null) {
+    const nested = extractCodeFromJson(json.result as Record<string, unknown>);
+    if (nested) return nested;
+  }
+
+  // 从任何字符串值里提取 6 位数字
+  const allText = JSON.stringify(json);
+  return extractCodeFromText(allText);
+}
+
+/** 从纯文本/HTML 里提取 6 位验证码 */
+function extractCodeFromText(text: string): string {
+  // 先找明确的验证码模式
+  const patterns = [
+    /验证码[：:]\s*(\d{6})/,
+    /code[：:]\s*(\d{6})/i,
+    /(\d{6})\s*(?:is your|verification|验证码)/i,
+  ];
+  for (const p of patterns) {
+    const m = p.exec(text);
+    if (m?.[1]) return m[1];
+  }
+
+  // 回退：找独立的 6 位数字
+  const match = /\b(\d{6})\b/.exec(text);
+  return match?.[1] || '';
 }
 
 // 清空收件箱，确保下次拿到的邮件是新的验证码
