@@ -4,6 +4,9 @@ import { isChatGptLoginPage } from '../register/chatgpt-auth-page';
 import { isEmailVerificationPage } from '../register/openai-email-verification-page';
 import { isAboutYouPage } from '../register/openai-about-you-page';
 import { fillPayOpenAiAddressNow } from '../address-autofill/pay-openai-autofill';
+import { runHostedOpenAiCheckoutFill, isHostedOpenAiCheckoutPage } from '../checkout-fill/hosted-openai-fill';
+import { isPayPalDomain, inspectPayPalState, submitPayPalLogin, dismissPayPalPrompts, clickPayPalApprove } from '../paypal-login/paypal-login-flow';
+import { loadPaypalAccountSettings } from '../settings/state';
 import { fetchSmsRelayCode } from '../sms/poller';
 import type { OrchestratorState, OrchestratorStep } from './types';
 import type { CheckoutLinkResponse, ChatGptSessionResponse } from '../link-extractor/types';
@@ -230,7 +233,7 @@ async function runStep(state: OrchestratorState): Promise<void> {
     return;
   }
 
-  // --- pay.openai.com：主动选择 PayPal + 填写地址 ---
+  // --- pay.openai.com：用 GuJumpgate 方式自动填 + 选 PayPal + 点订阅 ---
   if (hostname === 'pay.openai.com') {
     if (!state.completedSteps.includes('open-checkout')) {
       await markCompleted('open-checkout', '已到达支付页');
@@ -243,9 +246,6 @@ async function runStep(state: OrchestratorState): Promise<void> {
 
     await setStep('wait-payment-page', '支付页已到达，正在选择 PayPal 并填写地址...');
 
-    // 等待页面渲染
-    await delay(3000);
-
     // 获取随机地址
     const addressResponse = await browser.runtime.sendMessage({
       type: 'opx:fetch-random-address',
@@ -253,56 +253,117 @@ async function runStep(state: OrchestratorState): Promise<void> {
       city: '',
     });
 
-    if (addressResponse?.ok && addressResponse?.address) {
-      // 使用 pay-openai-autofill 中完善的填充逻辑（包括点击 PayPal + 填写所有字段）
-      const fillResult = await fillPayOpenAiAddressNow(addressResponse.address);
-      if (fillResult.ok) {
-        await markCompleted('wait-payment-page', `支付页已填写 ${fillResult.filled} 项，等待跳转 PayPal...`);
-      } else {
-        // 回退到简单方式
-        clickPaypalOption();
-        await delay(1000);
-        const address = addressResponse.address;
-        fillPaymentInput('#billingName', address.fullName);
-        fillPaymentSelect('#billingCountry', address.countryCode);
-        await delay(600);
-        fillPaymentInput('#billingAddressLine1', address.line1);
-        fillPaymentInput('#billingAddressLine2', address.line2);
-        fillPaymentInput('#billingLocality', address.city);
-        fillPaymentInput('#billingAdministrativeArea', address.state);
-        fillPaymentInput('#billingPostalCode', address.postalCode);
-        fillPaymentInput('#phoneNumber', address.phone);
-        checkTermsBoxes();
-        await markCompleted('wait-payment-page', '支付页已填写地址（回退方式），等待跳转 PayPal...');
-      }
-    } else {
+    if (!addressResponse?.ok || !addressResponse?.address) {
       await setStep('wait-payment-page', '获取地址失败，等待手动操作...');
+      return;
+    }
+
+    // 用新的 hosted-openai-fill(照搬 GuJumpgate 逻辑:MutationObserver 压住自动补全、双击 PayPal、完整事件链点击订阅)
+    const fillResult = await runHostedOpenAiCheckoutFill(addressResponse.address);
+    if (fillResult.ok) {
+      await markCompleted('wait-payment-page', `支付页已填写 ${fillResult.filled} 项并点击订阅，等待跳转 PayPal...`);
+    } else {
+      // 回退到旧逻辑
+      const address = addressResponse.address;
+      const fallbackResult = await fillPayOpenAiAddressNow(address);
+      if (fallbackResult.ok) {
+        await markCompleted('wait-payment-page', `支付页已填写(回退方式)，等待跳转 PayPal...`);
+      } else {
+        await setStep('wait-payment-page', fillResult.message || '填写未完成，等待手动操作...');
+      }
     }
     return;
   }
 
-  // --- paypal.com：等待 PayPal 自动填写 + 短信验证 ---
+  // --- paypal.com：用 GuJumpgate 方式的 PayPal 登录状态机 ---
   if (hostname === 'www.paypal.com' || hostname === 'paypal.com') {
     if (!state.completedSteps.includes('wait-payment-page')) {
       await markCompleted('wait-payment-page', '已跳转 PayPal');
     }
 
-    // PayPal 注册页面的卡号地址等由 paypal-autofill 自动处理
-    // 这里我们处理短信验证码
+    // 如果已完成 PayPal 登录授权
+    if (state.completedSteps.includes('paypal-login')) {
+      // 等待回跳 chatgpt.com / openai.com（但因为我们还在 paypal,所以继续等待）
+      await setStep('wait-paypal-return', 'PayPal 授权完成，等待回跳到 ChatGPT/OpenAI...');
+      return;
+    }
+
+    // 状态机:反复轮询 PayPal 页面状态,根据状态执行不同动作
+    await setStep('paypal-login', 'PayPal 页面检测中...');
+
+    const pageState = inspectPayPalState();
+
+    // 情况 A:需要登录(邮箱页 / 密码页 / 同页)
+    if (pageState.needsLogin) {
+      const paypalAccount = await loadPaypalAccountSettings();
+      if (!paypalAccount.email || !paypalAccount.password) {
+        await setStep('paypal-login', 'PayPal 需要登录但未配置账号，请在设置中填写 PayPal 邮箱和密码');
+        return;
+      }
+
+      await setStep('paypal-login', '正在填写 PayPal 登录信息...');
+      const loginResult = await submitPayPalLogin({
+        email: paypalAccount.email,
+        password: paypalAccount.password,
+      });
+
+      if (loginResult.error) {
+        await setStep('error', `PayPal 登录失败：${loginResult.error}`, loginResult.error);
+        return;
+      }
+
+      if (loginResult.phase === 'email_submitted') {
+        await setStep('paypal-login', 'PayPal 邮箱已提交，等待密码页...');
+      } else if (loginResult.phase === 'password_submitted') {
+        await setStep('paypal-login', 'PayPal 密码已提交，等待授权页...');
+      }
+      return;
+    }
+
+    // 情况 B:Passkey 弹窗
+    if (pageState.hasPasskeyPrompt) {
+      await setStep('paypal-login', '检测到 Passkey 弹窗，正在关闭...');
+      await dismissPayPalPrompts();
+      return;
+    }
+
+    // 情况 C:授权按钮已出现 → 点击"同意并继续"
+    if (pageState.approveReady) {
+      await setStep('paypal-login', '正在点击 PayPal"同意并继续"...');
+      const approveResult = await clickPayPalApprove();
+      if (approveResult.clicked) {
+        await markCompleted('paypal-login', 'PayPal 授权已完成，等待回跳...');
+      } else {
+        await setStep('paypal-login', '授权按钮点击未成功，继续等待...');
+      }
+      return;
+    }
+
+    // 情况 D:还在 PayPal 但不在登录/授权页(可能是中间跳转)
+    // PayPal 短信验证码页
     if (isPaypalSmsVerificationPage()) {
       await setStep('wait-paypal-sms', '检测到 PayPal 短信验证页，正在接码...');
       const smsResult = await pollPaypalSms();
       if (smsResult.ok) {
         await markCompleted('wait-paypal-sms', `短信验证码已填入：${smsResult.code}`);
-        await setStep('done', '全流程完成！');
-        await saveOrchestratorState({ enabled: false });
-        cancelPolling();
       } else {
         await setStep('wait-paypal-sms', smsResult.message);
       }
-    } else {
-      await setStep('wait-paypal-sms', 'PayPal 页面填写中，等待短信验证...');
+      return;
     }
+
+    await setStep('paypal-login', 'PayPal 页面等待中...');
+    return;
+  }
+
+  // --- 回跳检测:如果从 paypal 跳回 chatgpt.com/openai.com ---
+  if ((hostname === 'chatgpt.com' || hostname.endsWith('.openai.com')) &&
+      state.completedSteps.includes('paypal-login') &&
+      !state.completedSteps.includes('wait-paypal-return')) {
+    await markCompleted('wait-paypal-return', '已从 PayPal 回跳到 ChatGPT/OpenAI');
+    await setStep('done', '全流程完成！');
+    await saveOrchestratorState({ enabled: false });
+    cancelPolling();
     return;
   }
 
@@ -629,7 +690,8 @@ function isValidStep(value: unknown): value is OrchestratorStep {
   return typeof value === 'string' && [
     'idle', 'fill-email', 'wait-otp', 'fill-profile',
     'fetch-session', 'generate-link', 'open-checkout',
-    'wait-payment-page', 'wait-paypal-sms', 'done', 'error',
+    'wait-payment-page', 'paypal-login', 'wait-paypal-return',
+    'wait-paypal-sms', 'done', 'error',
   ].includes(value);
 }
 
@@ -641,89 +703,4 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// --- PayPal 点击和地址填写辅助函数 ---
-
-function clickPaypalOption(): void {
-  // 尝试各种选择器点击 PayPal
-  const selectors = [
-    '[data-testid="paypal-accordion-item"]',
-    '#payment-method-accordion-item-title-paypal',
-    'button[data-testid="paypal-accordion-item-button"]',
-    'button[aria-label*="PayPal"]',
-    '[aria-label*="paypal" i]',
-  ];
-
-  for (const selector of selectors) {
-    const el = document.querySelector<HTMLElement>(selector);
-    if (el) {
-      el.click();
-      console.info('[OPX Auto] 点击了 PayPal:', selector);
-      return;
-    }
-  }
-
-  // 找包含 "PayPal" 文字的可点击元素
-  const allClickable = document.querySelectorAll<HTMLElement>('button, label, [role="button"], [role="radio"], div[class*="accordion"], div[class*="payment"]');
-  for (const el of Array.from(allClickable)) {
-    const text = (el.textContent || '').toLowerCase();
-    if (text.includes('paypal') && !text.includes('银行')) {
-      el.click();
-      console.info('[OPX Auto] 通过文本点击了 PayPal');
-      return;
-    }
-  }
-
-  // 尝试点击 radio button
-  const radios = document.querySelectorAll<HTMLInputElement>('input[type="radio"]');
-  for (const radio of Array.from(radios)) {
-    const parent = radio.closest('label, div, li');
-    if (parent && (parent.textContent || '').toLowerCase().includes('paypal')) {
-      radio.click();
-      console.info('[OPX Auto] 点击了 PayPal radio');
-      return;
-    }
-  }
-
-  console.warn('[OPX Auto] 未找到 PayPal 选项');
-}
-
-function fillPaymentInput(selector: string, value: string): void {
-  if (!value) return;
-  const input = document.querySelector<HTMLInputElement>(selector);
-  if (!input) return;
-  if (input.value === value) return;
-
-  const proto = HTMLInputElement.prototype;
-  const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-  if (desc?.set) {
-    desc.set.call(input, value);
-  } else {
-    input.value = value;
-  }
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  input.dispatchEvent(new Event('change', { bubbles: true }));
-  input.dispatchEvent(new Event('blur', { bubbles: true }));
-}
-
-function fillPaymentSelect(selector: string, value: string): void {
-  if (!value) return;
-  const select = document.querySelector<HTMLSelectElement>(selector);
-  if (!select) return;
-  const option = Array.from(select.options).find(o => o.value === value || o.text.toLowerCase().includes(value.toLowerCase()));
-  if (option && select.value !== option.value) {
-    select.value = option.value;
-    select.dispatchEvent(new Event('change', { bubbles: true }));
-  }
-}
-
-function checkTermsBoxes(): void {
-  const checkboxes = document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
-  for (const cb of Array.from(checkboxes)) {
-    if (!cb.checked) {
-      const text = (cb.closest('label, div')?.textContent || '').toLowerCase();
-      if (text.includes('terms') || text.includes('consent') || text.includes('条款') || text.includes('同意') || cb.id.includes('terms')) {
-        cb.click();
-      }
-    }
-  }
-}
+// --- PayPal 点击和地址填写辅助函数(已移至 checkout-fill 和 paypal-login 模块) ---

@@ -1,5 +1,10 @@
 import { checkLatestVersion } from '../version-check/github';
-import { loadAddressAutofillSettings, saveAddressAutofillSettings } from './state';
+import {
+  loadAddressAutofillSettings,
+  loadPaypalAccountSettings,
+  saveAddressAutofillSettings,
+  savePaypalAccountSettings,
+} from './state';
 
 const TG_GROUP_URL = 'https://t.me/fuck_open';
 
@@ -56,6 +61,41 @@ export function createSettingsDialog(options: SettingsDialogOptions = {}): Setti
     '用于 paypal.com/checkoutweb/signup 页面，填写国家、邮箱、卡资料、姓名、地址和密码提示。',
   );
 
+  // PayPal 已有账号(用于 pay.openai → paypal.com 登录授权步骤)
+  const paypalAccountSection = document.createElement('div');
+  paypalAccountSection.className = 'opx-setting-item';
+  const paypalAccountTitle = document.createElement('div');
+  paypalAccountTitle.style.cssText = 'font-weight:600;font-size:13px;margin-bottom:4px;';
+  paypalAccountTitle.textContent = 'PayPal 登录账号(自动授权用)';
+  const paypalAccountDesc = document.createElement('div');
+  paypalAccountDesc.className = 'opx-setting-description';
+  paypalAccountDesc.textContent = '从 pay.openai 跳转到 paypal.com 时自动填邮箱、密码并点同意并继续。';
+
+  const paypalEmailInput = document.createElement('input');
+  paypalEmailInput.type = 'email';
+  paypalEmailInput.className = 'opx-input';
+  paypalEmailInput.placeholder = 'PayPal 邮箱';
+  paypalEmailInput.style.cssText = 'width:100%;margin-top:6px;padding:6px 8px;font-size:12px;box-sizing:border-box;';
+  paypalEmailInput.autocomplete = 'off';
+
+  const paypalPasswordInput = document.createElement('input');
+  paypalPasswordInput.type = 'password';
+  paypalPasswordInput.className = 'opx-input';
+  paypalPasswordInput.placeholder = 'PayPal 密码';
+  paypalPasswordInput.style.cssText = 'width:100%;margin-top:6px;padding:6px 8px;font-size:12px;box-sizing:border-box;';
+  paypalPasswordInput.autocomplete = 'off';
+
+  paypalAccountSection.append(paypalAccountTitle, paypalAccountDesc, paypalEmailInput, paypalPasswordInput);
+
+  paypalEmailInput.addEventListener('change', async () => {
+    await savePaypalAccountSettings({ email: paypalEmailInput.value.trim() });
+    setStatus(status, 'PayPal 账号已保存', 'ok');
+  });
+  paypalPasswordInput.addEventListener('change', async () => {
+    await savePaypalAccountSettings({ password: paypalPasswordInput.value });
+    setStatus(status, 'PayPal 密码已保存', 'ok');
+  });
+
   const checkUpdateButton = document.createElement('button');
   checkUpdateButton.className = 'opx-external-link-button';
   checkUpdateButton.type = 'button';
@@ -75,7 +115,7 @@ export function createSettingsDialog(options: SettingsDialogOptions = {}): Setti
   const status = document.createElement('div');
   status.className = 'opx-status';
 
-  dialog.append(header, payOpenAiItem, payPalSignupItem, checkUpdateButton, tgGroupButton, hint, status);
+  dialog.append(header, payOpenAiItem, payPalSignupItem, paypalAccountSection, checkUpdateButton, tgGroupButton, hint, status);
   overlay.append(dialog);
 
   closeButton.addEventListener('click', close);
@@ -120,8 +160,17 @@ export function createSettingsDialog(options: SettingsDialogOptions = {}): Setti
     const settings = await loadAddressAutofillSettings();
     payOpenAiCheckbox.checked = settings.payOpenAiEnabled;
     payPalSignupCheckbox.checked = settings.payPalSignupEnabled;
+    const paypal = await loadPaypalAccountSettings();
+    paypalEmailInput.value = paypal.email || '';
+    paypalPasswordInput.value = paypal.password || '';
     const enabledCount = Number(settings.payOpenAiEnabled) + Number(settings.payPalSignupEnabled);
-    setStatus(status, enabledCount > 0 ? `已开启 ${enabledCount} 项自动填写` : '自动填写未开启', enabledCount > 0 ? 'ok' : 'pending');
+    const paypalConfigured = paypal.email && paypal.password;
+    const statusText = paypalConfigured
+      ? `已开启 ${enabledCount} 项自动填写,PayPal 账号已配置`
+      : enabledCount > 0
+        ? `已开启 ${enabledCount} 项自动填写(尚未配置 PayPal 账号)`
+        : '自动填写未开启';
+    setStatus(status, statusText, enabledCount > 0 ? 'ok' : 'pending');
   };
 
   return {

@@ -1,5 +1,5 @@
 import type { AddressProfile } from '../address-autofill/types';
-import type { AddressAutofillSettings, ExtensionSettings } from './types';
+import type { AddressAutofillSettings, ExtensionSettings, PaypalAccountSettings } from './types';
 
 const SETTINGS_STORAGE_KEY = 'opx.extension.settings';
 
@@ -12,8 +12,15 @@ const DEFAULT_ADDRESS_AUTOFILL_SETTINGS: AddressAutofillSettings = {
   updatedAt: 0,
 };
 
+const DEFAULT_PAYPAL_ACCOUNT_SETTINGS: PaypalAccountSettings = {
+  email: '',
+  password: '',
+  updatedAt: 0,
+};
+
 const DEFAULT_SETTINGS: ExtensionSettings = {
   addressAutofill: DEFAULT_ADDRESS_AUTOFILL_SETTINGS,
+  paypalAccount: DEFAULT_PAYPAL_ACCOUNT_SETTINGS,
   updatedAt: 0,
 };
 
@@ -74,8 +81,40 @@ export function normalizeExtensionSettings(value: unknown): ExtensionSettings {
   const source = isRecord(value) ? value : {};
   return {
     addressAutofill: normalizeAddressAutofillSettings(source.addressAutofill),
+    paypalAccount: normalizePaypalAccountSettings(source.paypalAccount),
     updatedAt: Number(source.updatedAt || DEFAULT_SETTINGS.updatedAt),
   };
+}
+
+export function normalizePaypalAccountSettings(value: unknown): PaypalAccountSettings {
+  const source = isRecord(value) ? value : {};
+  return {
+    email: String(source.email || DEFAULT_PAYPAL_ACCOUNT_SETTINGS.email).trim(),
+    password: String(source.password || DEFAULT_PAYPAL_ACCOUNT_SETTINGS.password),
+    updatedAt: Number(source.updatedAt || DEFAULT_PAYPAL_ACCOUNT_SETTINGS.updatedAt),
+  };
+}
+
+export async function loadPaypalAccountSettings(): Promise<PaypalAccountSettings> {
+  return (await loadExtensionSettings()).paypalAccount;
+}
+
+export async function savePaypalAccountSettings(
+  patch: Partial<PaypalAccountSettings>,
+): Promise<PaypalAccountSettings> {
+  const current = await loadExtensionSettings();
+  const paypalAccount = normalizePaypalAccountSettings({
+    ...current.paypalAccount,
+    ...patch,
+    updatedAt: Date.now(),
+  });
+  const next = normalizeExtensionSettings({
+    ...current,
+    paypalAccount,
+    updatedAt: Date.now(),
+  });
+  await browser.storage.local.set({ [SETTINGS_STORAGE_KEY]: next });
+  return next.paypalAccount;
 }
 
 export function normalizeAddressAutofillSettings(value: unknown): AddressAutofillSettings {
