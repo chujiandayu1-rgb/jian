@@ -13,12 +13,14 @@ export function createRegisterController(): RegisterController {
     loadState: loadRegisterState,
     saveInput: async (rawInput: string) => {
       const parsed = parseAccountInput(rawInput);
+      const current = await loadRegisterState();
       return saveRegisterState({
         rawInput,
         email: parsed.email,
         accountLine: parsed.accountLine,
         inputMode: parsed.mode,
         autoOtp: parsed.mode === 'outlook-line',
+        apiBase: current.apiBase, // 保留用户已修改的 API 地址
       });
     },
     fillEmailFromInput: async () => {
@@ -36,6 +38,7 @@ export function createRegisterController(): RegisterController {
         inputMode: parsed.mode,
         autoOtp: parsed.mode === 'outlook-line',
         otpRequestedAt: Date.now(),
+        apiBase: state.apiBase, // 保留用户已修改的 API 地址
       });
       return fillEmailAndContinue(parsed.email);
     },

@@ -59,6 +59,8 @@ export function createAutoPanel(container: HTMLElement): FeaturePanelHandle {
     'generate-link',
     'open-checkout',
     'wait-payment-page',
+    'paypal-login',
+    'wait-paypal-return',
     'wait-paypal-sms',
   ];
 
