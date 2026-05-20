@@ -124,9 +124,9 @@ async function waitForOutlookOtp(message: OutlookOtpMessage): Promise<OutlookOtp
 /**
  * 用户自定义 API 获取验证码
  * 支持格式：
- *  - http://www.yxiang6.com/boobar?email=  → 拼接邮箱到末尾
- *  - http://example.com/api?email=xxx&key=yyy → 已包含 email 参数则替换
- *  - http://example.com/api/xxx@outlook.com → 邮箱在路径里
+ *  - http://www.yxiang6.com/boobar?email=  → 识别为 yxiang6 类服务，调 /api/GetLastEmails
+ *  - http://example.com/api?email=xxx      → 直接拼邮箱请求
+ *  - 其他自定义格式
  */
 async function fetchOtpFromCustomApi(
   apiBase: string,
@@ -136,18 +136,33 @@ async function fetchOtpFromCustomApi(
     return { ok: false, fatal: true, message: '没有邮箱地址' };
   }
 
+  // 尝试解析 URL 以获取域名
+  let baseUrl: URL;
+  try {
+    // 去除末尾的 email= 参数等，提取纯域名
+    const cleanUrl = apiBase.replace(/[?&]email=.*$/i, '').replace(/\/+$/, '');
+    baseUrl = new URL(cleanUrl || apiBase);
+  } catch {
+    baseUrl = new URL(apiBase.includes('://') ? apiBase : `http://${apiBase}`);
+  }
+
+  const hostname = baseUrl.hostname.replace(/^www\./, '');
+
+  // 如果是 yxiang6.com 域名（不管路径是什么），直接用 /api/GetLastEmails 接口
+  if (hostname === 'yxiang6.com') {
+    const origin = baseUrl.origin; // e.g. http://www.yxiang6.com
+    return fetchOtpFromYxiangApi(origin, email);
+  }
+
+  // 通用自定义 API：拼接 email 参数
   let url: string;
-  // 如果 URL 以 ?email= 或 &email= 结尾，直接拼邮箱
   if (apiBase.endsWith('?email=') || apiBase.endsWith('&email=')) {
     url = apiBase + encodeURIComponent(email);
   } else if (apiBase.includes('?email=') || apiBase.includes('&email=')) {
-    // URL 里已经有 email 参数值，替换它
     url = apiBase.replace(/([?&]email=)[^&]*/i, `$1${encodeURIComponent(email)}`);
   } else if (apiBase.includes('?')) {
-    // 有其他参数但没有 email，追加 email 参数
     url = `${apiBase}&email=${encodeURIComponent(email)}`;
   } else {
-    // 没有任何参数，加上 ?email=
     url = `${apiBase}?email=${encodeURIComponent(email)}`;
   }
 
@@ -165,16 +180,13 @@ async function fetchOtpFromCustomApi(
     return { ok: false, fatal: false, message: `自定义 API 返回 ${response.status}：${text.slice(0, 200)}` };
   }
 
-  // 尝试解析返回内容中的验证码
   const text = await response.text();
   let code = '';
 
-  // 1. 尝试 JSON 解析
   try {
     const json = JSON.parse(text) as Record<string, unknown>;
     code = extractCodeFromJson(json);
   } catch {
-    // 不是 JSON，从纯文本提取
     code = extractCodeFromText(text);
   }
 
@@ -183,6 +195,54 @@ async function fetchOtpFromCustomApi(
   }
 
   return { ok: false, message: `自定义 API 暂未返回验证码（响应: ${text.slice(0, 100)}）` };
+}
+
+/**
+ * yxiang6 类型的 API：调用 /api/GetLastEmails 获取邮件并提取验证码
+ */
+async function fetchOtpFromYxiangApi(
+  origin: string,
+  email: string,
+): Promise<OutlookOtpResponse & { fatal?: boolean }> {
+  try {
+    // 收件箱
+    const inboxUrl = `${origin}/api/GetLastEmails?email=${encodeURIComponent(email)}&boxType=1&num=2`;
+    console.info('[OPX 自定义yxiang6] 请求收件箱:', inboxUrl);
+
+    const response = await fetch(inboxUrl, { method: 'GET', cache: 'no-store' });
+    if (!response.ok) {
+      return { ok: false, fatal: false, message: `yxiang6 API 返回 ${response.status}` };
+    }
+
+    const data = await response.json() as { code?: number; data?: any[]; message?: string };
+    if (data.code === 200 && Array.isArray(data.data)) {
+      for (const mail of data.data) {
+        const code = extractOtpFromYxiangMail(mail);
+        if (code) {
+          return { ok: true, code, message: `收到验证码：${code}` };
+        }
+      }
+    }
+
+    // 垃圾箱
+    const spamUrl = `${origin}/api/GetLastEmails?email=${encodeURIComponent(email)}&boxType=2&num=2`;
+    const spamResponse = await fetch(spamUrl, { method: 'GET', cache: 'no-store' });
+    if (spamResponse.ok) {
+      const spamData = await spamResponse.json() as { code?: number; data?: any[] };
+      if (spamData.code === 200 && Array.isArray(spamData.data)) {
+        for (const mail of spamData.data) {
+          const code = extractOtpFromYxiangMail(mail);
+          if (code) {
+            return { ok: true, code, message: `收到验证码(垃圾箱)：${code}` };
+          }
+        }
+      }
+    }
+
+    return { ok: false, message: data.message || '暂未收到验证码' };
+  } catch (error) {
+    return { ok: false, fatal: false, message: `yxiang6 API 错误：${String(error)}` };
+  }
 }
 
 /** 从 JSON 响应里提取验证码 */
