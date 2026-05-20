@@ -73,8 +73,7 @@ export function createRegisterPanel(container: HTMLElement, controller: Register
 
   apiInput.addEventListener('change', async () => {
     const value = apiInput.value.trim() || 'http://127.0.0.1:8787';
-    await controller.saveInput(accountInput.value);
-    // 保存 API 地址到 state
+    // 直接保存 API 地址，不触发 saveInput（避免覆盖）
     const { saveRegisterState } = await import('../../app/state');
     await saveRegisterState({ apiBase: value });
     setStatus(status, `收码地址已保存：${value}`, 'ok');
